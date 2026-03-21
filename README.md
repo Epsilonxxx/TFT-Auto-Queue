@@ -1,30 +1,14 @@
-# TFT-Auto-Queue
+中文介绍
 
-React + Tailwind desktop app for TFT auto queue in Tocker's Trials.
+一个用于 LOL 国际服云顶之弈 的轻量小工具，专门服务于 发条鸟试炼模式自动匹配。
+它会帮你自动处理那些重复又无聊的操作，比如排队、接受对局、结算后继续下一把。
+搭配 鼠标宏 使用时，还可以更轻松地实现挂机刷通行证经验。
 
-## Features
 
-- F1 global hotkey to toggle auto queue
-- Random 1-2 second delay for matchmaking/accept actions
-- Auto accept ready-check
-- Auto continue after game ends
-- Cycle counter
-- Log history limited to 50 lines
-
-## Run
-
-```powershell
-cd D:\tft-auto-queue-next
-npm install
-npm run start
-```
-
-## Build Installer
-
-```powershell
-npm run dist
-```
-
-Installer output:
-
-`D:\tft-auto-queue-next\release\TFT Auto Queue Setup 0.2.0.exe`
+功能
+自动匹配发条鸟试炼
+自动接受对局
+对局结束后自动继续
+随机操作延迟，更像自然点击
+循环次数统计
+简洁日志记录
