@@ -43,6 +43,7 @@ function isTockersTrialsQueue(queue: GameQueue): boolean {
   if (queue.id === 1220) {
     return true;
   }
+
   const raw = [
     queue.name ?? "",
     queue.shortName ?? "",
@@ -52,6 +53,7 @@ function isTockersTrialsQueue(queue: GameQueue): boolean {
     queue.category ?? "",
     queue.map ?? ""
   ].join(" ");
+
   const normalized = normalizeText(raw);
   return raw.includes("发条鸟的试炼") || normalized.includes("tockerstrials");
 }
@@ -75,6 +77,11 @@ export class AutoQueueService {
   private activeQueueName = "Tocker's Trials";
   private readonly delayMinMs = 1000;
   private readonly delayMaxMs = 2000;
+
+  private readonly reconnectCooldownMs = 5000;
+  private reconnecting = false;
+  private consecutiveTickFailures = 0;
+  private lastReconnectAt = 0;
 
   constructor() {
     const queueIdRaw = (process.env.TFT_QUEUE_ID ?? "").trim();
@@ -110,16 +117,9 @@ export class AutoQueueService {
       return;
     }
 
-    const creds = discoverLcuCredentials();
-    this.lcu = new LcuClient(creds);
-    const queue = await this.resolveQueue();
-    this.activeQueueId = queue.id;
-    this.activeQueueName = queue.name;
+    await this.initializeLcuAndQueue();
     this.enabled = true;
-
-    this.lcu.connectGameflowEvents((phase) => {
-      void this.handlePhase(phase);
-    });
+    this.connectPhaseEvents();
 
     this.pollTimer = setInterval(() => {
       void this.tick();
@@ -153,6 +153,8 @@ export class AutoQueueService {
     this.lastPhase = null;
     this.lastPostGameActionAt = 0;
     this.inCurrentMatch = false;
+    this.consecutiveTickFailures = 0;
+    this.reconnecting = false;
     log("Disabled.");
   }
 
@@ -160,11 +162,17 @@ export class AutoQueueService {
     if (!this.enabled || !this.lcu) {
       return;
     }
+
     try {
       const phase = await this.lcu.get<GameflowPhase>("/lol-gameflow/v1/gameflow-phase");
+      this.consecutiveTickFailures = 0;
       await this.handlePhase(phase);
     } catch (err) {
+      this.consecutiveTickFailures += 1;
       log(`Phase read failed: ${String(err)}`);
+      if (this.consecutiveTickFailures >= 2) {
+        await this.tryRecoverLcuConnection();
+      }
     }
   }
 
@@ -208,6 +216,9 @@ export class AutoQueueService {
         case "EndOfGame":
         case "WaitingForStats":
           await this.handlePostGamePhase();
+          break;
+        case "Reconnect":
+          await this.tryReconnectGameSession();
           break;
         default:
           break;
@@ -299,6 +310,21 @@ export class AutoQueueService {
     }
   }
 
+  private async tryReconnectGameSession(): Promise<void> {
+    if (!this.lcu) {
+      return;
+    }
+    try {
+      await this.lcu.post("/lol-gameflow/v1/reconnect");
+      log("Reconnect command sent.");
+    } catch (err) {
+      if (isHttpStatus(err, 400) || isHttpStatus(err, 404) || isHttpStatus(err, 409) || isHttpStatus(err, 422)) {
+        return;
+      }
+      log(`Reconnect request failed: ${String(err)}`);
+    }
+  }
+
   private async tryPost(path: string): Promise<boolean> {
     if (!this.lcu) {
       return false;
@@ -328,5 +354,48 @@ export class AutoQueueService {
       throw new Error("Tocker's Trials queue not found.");
     }
     return { id: found.id, name: found.name ?? found.shortName ?? "Tocker's Trials" };
+  }
+
+  private async initializeLcuAndQueue(): Promise<void> {
+    const creds = discoverLcuCredentials();
+    this.lcu = new LcuClient(creds);
+    const queue = await this.resolveQueue();
+    this.activeQueueId = queue.id;
+    this.activeQueueName = queue.name;
+  }
+
+  private connectPhaseEvents(): void {
+    if (!this.lcu) {
+      return;
+    }
+    this.lcu.connectGameflowEvents((phase) => {
+      void this.handlePhase(phase);
+    });
+  }
+
+  private async tryRecoverLcuConnection(): Promise<void> {
+    if (!this.enabled || this.reconnecting) {
+      return;
+    }
+
+    const now = Date.now();
+    if (now - this.lastReconnectAt < this.reconnectCooldownMs) {
+      return;
+    }
+    this.lastReconnectAt = now;
+    this.reconnecting = true;
+
+    try {
+      log("LCU connection unstable, trying recovery...");
+      this.lcu?.close();
+      await this.initializeLcuAndQueue();
+      this.connectPhaseEvents();
+      this.consecutiveTickFailures = 0;
+      log("LCU connection recovered.");
+    } catch (err) {
+      log(`LCU recovery failed: ${String(err)}`);
+    } finally {
+      this.reconnecting = false;
+    }
   }
 }

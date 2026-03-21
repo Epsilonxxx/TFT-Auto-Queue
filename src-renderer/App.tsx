@@ -54,10 +54,10 @@ export function App() {
       setLogs(data.logs.slice(-LOG_LIMIT));
     });
 
-    window.tftApi.onState((next) => {
+    const offState = window.tftApi.onState((next) => {
       setState(next);
     });
-    window.tftApi.onLog((line) => {
+    const offLog = window.tftApi.onLog((line) => {
       setLogs((prev) => {
         const next = [...prev, line];
         if (next.length > LOG_LIMIT) {
@@ -69,6 +69,8 @@ export function App() {
 
     return () => {
       mounted = false;
+      offState();
+      offLog();
     };
   }, []);
 

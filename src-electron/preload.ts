@@ -10,9 +10,13 @@ contextBridge.exposeInMainWorld("tftApi", {
   toggle: () => ipcRenderer.invoke("toggle"),
   getInitialData: () => ipcRenderer.invoke("initial-data") as Promise<InitialData>,
   onState: (listener: (state: ServiceSnapshot) => void) => {
-    ipcRenderer.on("state", (_event, state: ServiceSnapshot) => listener(state));
+    const handler = (_event: unknown, state: ServiceSnapshot) => listener(state);
+    ipcRenderer.on("state", handler);
+    return () => ipcRenderer.removeListener("state", handler);
   },
   onLog: (listener: (line: string) => void) => {
-    ipcRenderer.on("log", (_event, line: string) => listener(line));
+    const handler = (_event: unknown, line: string) => listener(line);
+    ipcRenderer.on("log", handler);
+    return () => ipcRenderer.removeListener("log", handler);
   }
 });

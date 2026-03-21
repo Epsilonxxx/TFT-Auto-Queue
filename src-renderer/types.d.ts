@@ -16,8 +16,8 @@ declare global {
     tftApi: {
       toggle: () => Promise<ServiceSnapshot>;
       getInitialData: () => Promise<InitialData>;
-      onState: (listener: (state: ServiceSnapshot) => void) => void;
-      onLog: (listener: (line: string) => void) => void;
+      onState: (listener: (state: ServiceSnapshot) => void) => () => void;
+      onLog: (listener: (line: string) => void) => () => void;
     };
   }
 }
