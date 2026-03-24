@@ -53,13 +53,35 @@ function isTockersTrialsQueue(queue: GameQueue): boolean {
     queue.category ?? "",
     queue.map ?? ""
   ].join(" ");
-
   const normalized = normalizeText(raw);
   return raw.includes("发条鸟的试炼") || normalized.includes("tockerstrials");
 }
 
 function randomBetween(min: number, max: number): number {
   return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function extractErrorText(err: unknown): string {
+  if (!(err instanceof AxiosError)) {
+    return String(err ?? "");
+  }
+  const data = err.response?.data;
+  if (typeof data === "string") {
+    return data;
+  }
+  if (data && typeof data === "object") {
+    return JSON.stringify(data);
+  }
+  return err.message ?? "";
+}
+
+function isQueueLimitedError(err: unknown): boolean {
+  const text = extractErrorText(err).toLowerCase();
+  return (
+    text.includes("无法进入匹配队列，请稍后再试") ||
+    text.includes("unable to enter matchmaking queue") ||
+    text.includes("please try again later")
+  );
 }
 
 export class AutoQueueService {
@@ -75,8 +97,14 @@ export class AutoQueueService {
   private cycleCount = 0;
   private activeQueueId = 1220;
   private activeQueueName = "Tocker's Trials";
+
   private readonly delayMinMs = 1000;
   private readonly delayMaxMs = 2000;
+  private pendingPostGameSearchDelay = false;
+
+  private readonly queueRetryBlockMs = 3 * 60 * 1000;
+  private searchBlockedUntil = 0;
+  private lastBlockedLogAt = 0;
 
   private readonly reconnectCooldownMs = 5000;
   private reconnecting = false;
@@ -153,6 +181,9 @@ export class AutoQueueService {
     this.lastPhase = null;
     this.lastPostGameActionAt = 0;
     this.inCurrentMatch = false;
+    this.pendingPostGameSearchDelay = false;
+    this.searchBlockedUntil = 0;
+    this.lastBlockedLogAt = 0;
     this.consecutiveTickFailures = 0;
     this.reconnecting = false;
     log("Disabled.");
@@ -194,6 +225,7 @@ export class AutoQueueService {
       if (this.inCurrentMatch) {
         this.inCurrentMatch = false;
         this.cycleCount += 1;
+        this.pendingPostGameSearchDelay = true;
         log(`Cycle completed: ${this.cycleCount}`);
       }
     } else {
@@ -254,12 +286,33 @@ export class AutoQueueService {
     if (!this.lcu) {
       return;
     }
-    await this.applyHumanizedDelay("matchmaking-search");
+
+    const now = Date.now();
+    if (now < this.searchBlockedUntil) {
+      if (now - this.lastBlockedLogAt > 15000) {
+        const leftSec = Math.ceil((this.searchBlockedUntil - now) / 1000);
+        log(`Queue retry blocked, waiting ${leftSec}s before next attempt.`);
+        this.lastBlockedLogAt = now;
+      }
+      return;
+    }
+
+    if (this.pendingPostGameSearchDelay) {
+      await this.applyPostGameSearchDelay();
+      this.pendingPostGameSearchDelay = false;
+    }
+
     try {
       await this.lcu.post("/lol-lobby/v2/lobby/matchmaking/search");
       log("Search started.");
     } catch (err) {
-      if (isHttpStatus(err, 400) || isHttpStatus(err, 409)) {
+      if (isQueueLimitedError(err)) {
+        this.searchBlockedUntil = Date.now() + this.queueRetryBlockMs;
+        this.lastBlockedLogAt = 0;
+        log("Queue temporarily limited by server. Will retry after 3 minutes.");
+        return;
+      }
+      if (isHttpStatus(err, 400) || isHttpStatus(err, 409) || isHttpStatus(err, 429)) {
         return;
       }
       throw err;
@@ -270,7 +323,6 @@ export class AutoQueueService {
     if (!this.lcu) {
       return;
     }
-    await this.applyHumanizedDelay("ready-check-accept");
     try {
       await this.lcu.post("/lol-matchmaking/v1/ready-check/accept");
       log("Ready-check accepted.");
@@ -282,9 +334,9 @@ export class AutoQueueService {
     }
   }
 
-  private async applyHumanizedDelay(action: string): Promise<void> {
+  private async applyPostGameSearchDelay(): Promise<void> {
     const delayMs = randomBetween(this.delayMinMs, this.delayMaxMs);
-    log(`Delay ${delayMs}ms before ${action}.`);
+    log(`Post-game requeue delay: ${delayMs}ms.`);
     await sleep(delayMs);
   }
 
