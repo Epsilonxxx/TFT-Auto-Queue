@@ -83,6 +83,7 @@ const LogsPanel = styled(Box)`
   overflow: hidden;
   white-space: pre-wrap;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), inset 0 -1px 0 rgba(15, 23, 42, 0.25);
+  margin-bottom: 8px;
 `;
 
 const StatIconBox = styled(Box)`
@@ -261,7 +262,7 @@ export function App() {
           </Box>
 
           <Card sx={{ flex: 1, minHeight: 0 }}>
-            <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
+            <CardContent sx={{ p: 2.5, "&:last-child": { pb: 2.5 } }}>
               <LogsPanel>{logContent || "No logs yet."}</LogsPanel>
             </CardContent>
           </Card>
