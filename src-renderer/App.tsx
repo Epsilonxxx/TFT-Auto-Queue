@@ -1,43 +1,133 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Activity, Clock3, Gamepad2, ListChecks, Loader2, Power, Waves } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  Box,
+  Button,
+  Card,
+  CardContent,
+  Chip,
+  Container,
+  CssBaseline,
+  Stack,
+  ThemeProvider,
+  Typography,
+  createTheme
+} from "@mui/material";
+import SportsEsportsRoundedIcon from "@mui/icons-material/SportsEsportsRounded";
+import TimelineRoundedIcon from "@mui/icons-material/TimelineRounded";
+import RepeatRoundedIcon from "@mui/icons-material/RepeatRounded";
+import FunctionsRoundedIcon from "@mui/icons-material/FunctionsRounded";
+import AutorenewRoundedIcon from "@mui/icons-material/AutorenewRounded";
+import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
+import StopCircleRoundedIcon from "@mui/icons-material/StopCircleRounded";
+import styled from "styled-components";
 import type { ServiceSnapshot } from "./types";
-import { Button } from "./components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
 
 const LOG_LIMIT = 50;
 
-function StatCard({
-  title,
-  value,
-  hint,
-  icon
-}: {
-  title: string;
-  value: string;
-  hint?: string;
-  icon: ReactNode;
-}) {
-  return (
-    <Card className="h-full">
-      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
-        <CardTitle className="text-sm font-medium text-slate-600">{title}</CardTitle>
-        <div className="text-slate-400">{icon}</div>
-      </CardHeader>
-      <CardContent>
-        <div className="text-2xl font-semibold text-slate-900">{value}</div>
-        <p className="mt-2 text-xs text-slate-500">{hint}</p>
-      </CardContent>
-    </Card>
-  );
-}
+const theme = createTheme({
+  palette: {
+    mode: "light",
+    primary: { main: "#2563eb" },
+    background: { default: "#f3f6fb", paper: "#ffffff" },
+    text: { primary: "#0f172a", secondary: "#64748b" }
+  },
+  shape: { borderRadius: 16 },
+  spacing: 8,
+  typography: {
+    fontFamily: "Inter, Segoe UI, system-ui, sans-serif",
+    h5: { fontWeight: 700, letterSpacing: "-0.01em" },
+    subtitle2: { fontWeight: 600 }
+  },
+  components: {
+    MuiCard: {
+      styleOverrides: {
+        root: {
+          borderRadius: 16,
+          boxShadow: "0 8px 24px rgba(15, 23, 42, 0.06)",
+          border: "1px solid #e2e8f0"
+        }
+      }
+    },
+    MuiButton: {
+      styleOverrides: {
+        root: {
+          textTransform: "none",
+          borderRadius: 12,
+          fontWeight: 600,
+          minHeight: 44
+        }
+      }
+    }
+  }
+});
+
+const PageWrap = styled.div`
+  height: 100vh;
+  overflow: hidden;
+  padding: 16px 0;
+`;
+
+const HeaderCard = styled(Card)`
+  margin-bottom: 24px;
+`;
+
+const LogsPanel = styled(Box)`
+  height: 288px;
+  border-radius: 14px;
+  border: 1px solid #d8e1ef;
+  background: linear-gradient(180deg, #0f172a 0%, #111c34 100%);
+  color: #dbe7ff;
+  padding: 16px 18px;
+  font-size: 12px;
+  line-height: 1.65;
+  overflow: hidden;
+  white-space: pre-wrap;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), inset 0 -1px 0 rgba(15, 23, 42, 0.25);
+`;
+
+const StatIconBox = styled(Box)`
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: #eff6ff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #2563eb;
+`;
 
 const emptyState: ServiceSnapshot = {
   enabled: false,
   queueId: 0,
   queueName: "-",
   phase: "-",
-  cycleCount: 0
+  totalCycleCount: 0,
+  sessionCycleCount: 0
 };
+
+function StatCard({
+  title,
+  value,
+  icon
+}: {
+  title: string;
+  value: string;
+  icon: React.ReactNode;
+}) {
+  return (
+    <Card>
+      <CardContent sx={{ p: 2.5, "&:last-child": { pb: 2.5 } }}>
+        <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1 }}>
+          <Typography variant="subtitle2" color="text.secondary">
+            {title}
+          </Typography>
+          <StatIconBox>{icon}</StatIconBox>
+        </Stack>
+        <Typography variant="h5">{value}</Typography>
+      </CardContent>
+    </Card>
+  );
+}
 
 export function App() {
   const [state, setState] = useState<ServiceSnapshot>(emptyState);
@@ -54,9 +144,7 @@ export function App() {
       setLogs(data.logs.slice(-LOG_LIMIT));
     });
 
-    const offState = window.tftApi.onState((next) => {
-      setState(next);
-    });
+    const offState = window.tftApi.onState((next) => setState(next));
     const offLog = window.tftApi.onLog((line) => {
       setLogs((prev) => {
         const next = [...prev, line];
@@ -75,17 +163,7 @@ export function App() {
   }, []);
 
   const statusLabel = state.enabled ? "Running" : "Stopped";
-  const statusClass = state.enabled
-    ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-    : "bg-slate-100 text-slate-600 border-slate-200";
-
-  const toggleButtonLabel = toggling
-    ? "Applying..."
-    : state.enabled
-      ? "Disable Auto Queue (F1)"
-      : "Enable Auto Queue (F1)";
-
-  const logContent = useMemo(() => logs.join("\n"), [logs]);
+  const logContent = useMemo(() => logs.slice(-12).join("\n"), [logs]);
 
   const onToggle = async () => {
     if (toggling) {
@@ -100,47 +178,95 @@ export function App() {
   };
 
   return (
-    <div className="min-h-screen bg-background">
-      <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-4 py-6 sm:px-6 sm:py-8">
-        <header className="surface p-6">
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <h1 className="text-2xl font-semibold tracking-tight text-slate-900">TFT Auto Queue</h1>
-              <p className="mt-2 text-sm text-slate-500">
-                Modern queue automation dashboard for Tocker&apos;s Trials.
-              </p>
-            </div>
-            <div className="flex items-center gap-3">
-              <span className={`rounded-xl border px-3 py-1.5 text-sm font-medium ${statusClass}`}>{statusLabel}</span>
-              <Button size="lg" disabled={toggling} onClick={onToggle} className="min-w-52">
-                {toggling ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Power className="mr-2 h-4 w-4" />}
-                {toggleButtonLabel}
-              </Button>
-            </div>
-          </div>
-        </header>
+    <ThemeProvider theme={theme}>
+      <CssBaseline />
+      <PageWrap>
+        <Container
+          maxWidth="lg"
+          sx={{ height: "100%", display: "flex", flexDirection: "column", gap: 2 }}
+        >
+          <HeaderCard>
+            <CardContent sx={{ p: 3 }}>
+              <Stack
+                direction={{ xs: "column", md: "row" }}
+                spacing={2}
+                justifyContent="space-between"
+                alignItems={{ xs: "flex-start", md: "center" }}
+              >
+                <Box>
+                  <Typography variant="h5">TFT Auto Queue</Typography>
+                </Box>
 
-        <section className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-          <StatCard title="Queue" value={state.queueName} hint={`ID: ${state.queueId || "-"}`} icon={<Gamepad2 size={18} />} />
-          <StatCard title="Phase" value={state.phase || "-"} hint="Real-time gameflow phase" icon={<Activity size={18} />} />
-          <StatCard title="Cycles" value={String(state.cycleCount)} hint="Completed matches in this session" icon={<ListChecks size={18} />} />
-          <StatCard title="Delay Range" value="1-2s" hint="Randomized per matchmaking action" icon={<Clock3 size={18} />} />
-        </section>
+                <Stack direction="row" spacing={1.5} alignItems="center">
+                  <Chip
+                    label={statusLabel}
+                    color={state.enabled ? "success" : "default"}
+                    variant={state.enabled ? "filled" : "outlined"}
+                    sx={{ fontWeight: 600 }}
+                  />
+                  <Button
+                    variant="contained"
+                    color={state.enabled ? "error" : "primary"}
+                    onClick={onToggle}
+                    disabled={toggling}
+                    startIcon={
+                      toggling ? (
+                        <AutorenewRoundedIcon className="spin" />
+                      ) : state.enabled ? (
+                        <StopCircleRoundedIcon />
+                      ) : (
+                        <PlayArrowRoundedIcon />
+                      )
+                    }
+                    sx={{ minWidth: 220 }}
+                  >
+                    {toggling ? "Applying..." : state.enabled ? "Stop Auto Queue (F1)" : "Start Auto Queue (F1)"}
+                  </Button>
+                </Stack>
+              </Stack>
+            </CardContent>
+          </HeaderCard>
 
-        <Card className="flex min-h-[320px] flex-col">
-          <CardHeader className="pb-3">
-            <CardTitle className="flex items-center gap-2 text-slate-800">
-              <Waves size={16} className="text-primary" />
-              Live Logs (last 50 lines)
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="pt-0">
-            <div className="h-[280px] rounded-xl border border-slate-200 bg-slate-950 p-4 text-xs leading-5 text-slate-100">
-              <pre className="h-full overflow-auto whitespace-pre-wrap">{logContent || "No logs yet."}</pre>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-    </div>
+          <Box
+            sx={{
+              display: "grid",
+              gap: 2,
+              gridTemplateColumns: {
+                xs: "1fr",
+                sm: "1fr 1fr",
+                lg: "1fr 1fr 1fr 1fr"
+              }
+            }}
+          >
+            <Box>
+              <StatCard title="Queue" value={state.queueName} icon={<SportsEsportsRoundedIcon fontSize="small" />} />
+            </Box>
+            <Box>
+              <StatCard title="Phase" value={state.phase || "-"} icon={<TimelineRoundedIcon fontSize="small" />} />
+            </Box>
+            <Box>
+              <StatCard
+                title="Current Session"
+                value={String(state.sessionCycleCount)}
+                icon={<RepeatRoundedIcon fontSize="small" />}
+              />
+            </Box>
+            <Box>
+              <StatCard
+                title="Total Runs"
+                value={String(state.totalCycleCount)}
+                icon={<FunctionsRoundedIcon fontSize="small" />}
+              />
+            </Box>
+          </Box>
+
+          <Card sx={{ flex: 1, minHeight: 0 }}>
+            <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
+              <LogsPanel>{logContent || "No logs yet."}</LogsPanel>
+            </CardContent>
+          </Card>
+        </Container>
+      </PageWrap>
+    </ThemeProvider>
   );
 }

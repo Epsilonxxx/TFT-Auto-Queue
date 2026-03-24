@@ -3,7 +3,8 @@ export type ServiceSnapshot = {
   queueId: number;
   queueName: string;
   phase: string;
-  cycleCount: number;
+  totalCycleCount: number;
+  sessionCycleCount: number;
 };
 
 export type InitialData = {

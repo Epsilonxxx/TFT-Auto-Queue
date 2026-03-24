@@ -14,11 +14,25 @@
   body {
     @apply bg-background text-foreground antialiased;
     font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+    overflow: hidden;
   }
 }
 
 @layer utilities {
   .surface {
     @apply rounded-xl bg-card shadow-card border border-border;
+  }
+
+  .spin {
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    from {
+      transform: rotate(0deg);
+    }
+    to {
+      transform: rotate(360deg);
+    }
   }
 }

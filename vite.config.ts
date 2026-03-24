@@ -6,6 +6,11 @@ export default defineConfig({
   plugins: [react()],
   root: "src-renderer",
   base: "./",
+  resolve: {
+    alias: {
+      "@mui/styled-engine": "@mui/styled-engine-sc"
+    }
+  },
   build: {
     outDir: path.resolve(__dirname, "dist-renderer"),
     emptyOutDir: true

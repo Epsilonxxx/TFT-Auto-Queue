@@ -24,7 +24,8 @@ export type ServiceSnapshot = {
   queueId: number;
   queueName: string;
   phase: string;
-  cycleCount: number;
+  totalCycleCount: number;
+  sessionCycleCount: number;
 };
 
 function sleep(ms: number): Promise<void> {
@@ -43,7 +44,6 @@ function isTockersTrialsQueue(queue: GameQueue): boolean {
   if (queue.id === 1220) {
     return true;
   }
-
   const raw = [
     queue.name ?? "",
     queue.shortName ?? "",
@@ -84,6 +84,15 @@ function isQueueLimitedError(err: unknown): boolean {
   );
 }
 
+function isPlayersNotReadyError(err: unknown): boolean {
+  const text = extractErrorText(err).toLowerCase();
+  return (
+    text.includes("players are not ready") ||
+    text.includes("玩家尚未完成准备") ||
+    text.includes("player has not finished ready")
+  );
+}
+
 export class AutoQueueService {
   private lcu: LcuClient | null = null;
   private enabled = false;
@@ -94,17 +103,23 @@ export class AutoQueueService {
   private lastPhase: GameflowPhase | null = null;
   private lastPostGameActionAt = 0;
   private inCurrentMatch = false;
-  private cycleCount = 0;
+
+  private totalCycleCount = 0;
+  private sessionCycleCount = 0;
+
   private activeQueueId = 1220;
   private activeQueueName = "Tocker's Trials";
 
-  private readonly delayMinMs = 1000;
-  private readonly delayMaxMs = 2000;
+  private readonly postGameDelayMinMs = 1000;
+  private readonly postGameDelayMaxMs = 2000;
   private pendingPostGameSearchDelay = false;
 
   private readonly queueRetryBlockMs = 3 * 60 * 1000;
   private searchBlockedUntil = 0;
   private lastBlockedLogAt = 0;
+
+  private lastHomeResetAt = 0;
+  private readonly homeResetCooldownMs = 10 * 1000;
 
   private readonly reconnectCooldownMs = 5000;
   private reconnecting = false;
@@ -127,7 +142,8 @@ export class AutoQueueService {
       queueId: this.activeQueueId,
       queueName: this.activeQueueName,
       phase: this.lastPhase ?? "Unknown",
-      cycleCount: this.cycleCount
+      totalCycleCount: this.totalCycleCount,
+      sessionCycleCount: this.sessionCycleCount
     };
   }
 
@@ -147,13 +163,14 @@ export class AutoQueueService {
 
     await this.initializeLcuAndQueue();
     this.enabled = true;
+    this.sessionCycleCount = 0;
     this.connectPhaseEvents();
 
     this.pollTimer = setInterval(() => {
       void this.tick();
     }, 2500);
 
-    log(`Enabled for queue: ${this.activeQueueName} (${this.activeQueueId})`);
+    log(`Enabled for queue: ${this.activeQueueName}`);
     await this.tick();
   }
 
@@ -224,9 +241,10 @@ export class AutoQueueService {
     if (phase === "PreEndOfGame" || phase === "EndOfGame" || phase === "WaitingForStats") {
       if (this.inCurrentMatch) {
         this.inCurrentMatch = false;
-        this.cycleCount += 1;
+        this.totalCycleCount += 1;
+        this.sessionCycleCount += 1;
         this.pendingPostGameSearchDelay = true;
-        log(`Cycle completed: ${this.cycleCount}`);
+        log(`Cycle completed. Session=${this.sessionCycleCount}, Total=${this.totalCycleCount}`);
       }
     } else {
       this.lastPostGameActionAt = 0;
@@ -279,7 +297,7 @@ export class AutoQueueService {
       }
     }
     await this.lcu.post("/lol-lobby/v2/lobby", { queueId: this.activeQueueId });
-    log(`Lobby created for ${this.activeQueueName}.`);
+    log("Lobby created.");
   }
 
   private async ensureSearch(): Promise<void> {
@@ -291,14 +309,16 @@ export class AutoQueueService {
     if (now < this.searchBlockedUntil) {
       if (now - this.lastBlockedLogAt > 15000) {
         const leftSec = Math.ceil((this.searchBlockedUntil - now) / 1000);
-        log(`Queue retry blocked, waiting ${leftSec}s before next attempt.`);
+        log(`Queue retry blocked, waiting ${leftSec}s.`);
         this.lastBlockedLogAt = now;
       }
       return;
     }
 
     if (this.pendingPostGameSearchDelay) {
-      await this.applyPostGameSearchDelay();
+      const delayMs = randomBetween(this.postGameDelayMinMs, this.postGameDelayMaxMs);
+      log(`Post-game requeue delay: ${delayMs}ms.`);
+      await sleep(delayMs);
       this.pendingPostGameSearchDelay = false;
     }
 
@@ -306,17 +326,46 @@ export class AutoQueueService {
       await this.lcu.post("/lol-lobby/v2/lobby/matchmaking/search");
       log("Search started.");
     } catch (err) {
+      if (isPlayersNotReadyError(err)) {
+        log("Players are not ready. Leaving current lobby and retrying.");
+        await this.recoverToHomeAndRetry();
+        return;
+      }
+
       if (isQueueLimitedError(err)) {
         this.searchBlockedUntil = Date.now() + this.queueRetryBlockMs;
         this.lastBlockedLogAt = 0;
-        log("Queue temporarily limited by server. Will retry after 3 minutes.");
+        log("Queue limited by server. Retry after 3 minutes.");
         return;
       }
+
       if (isHttpStatus(err, 400) || isHttpStatus(err, 409) || isHttpStatus(err, 429)) {
         return;
       }
       throw err;
     }
+  }
+
+  private async recoverToHomeAndRetry(): Promise<void> {
+    if (!this.lcu) {
+      return;
+    }
+
+    const now = Date.now();
+    if (now - this.lastHomeResetAt < this.homeResetCooldownMs) {
+      return;
+    }
+    this.lastHomeResetAt = now;
+
+    try {
+      await this.lcu.delete("/lol-lobby/v2/lobby");
+      log("Current lobby closed.");
+    } catch {
+      // ignore if lobby already gone
+    }
+
+    await sleep(1200);
+    await this.ensureLobbyAndSearch();
   }
 
   private async acceptReadyCheck(): Promise<void> {
@@ -332,12 +381,6 @@ export class AutoQueueService {
       }
       throw err;
     }
-  }
-
-  private async applyPostGameSearchDelay(): Promise<void> {
-    const delayMs = randomBetween(this.delayMinMs, this.delayMaxMs);
-    log(`Post-game requeue delay: ${delayMs}ms.`);
-    await sleep(delayMs);
   }
 
   private async handlePostGamePhase(): Promise<void> {
@@ -429,14 +472,13 @@ export class AutoQueueService {
     if (!this.enabled || this.reconnecting) {
       return;
     }
-
     const now = Date.now();
     if (now - this.lastReconnectAt < this.reconnectCooldownMs) {
       return;
     }
+
     this.lastReconnectAt = now;
     this.reconnecting = true;
-
     try {
       log("LCU connection unstable, trying recovery...");
       this.lcu?.close();

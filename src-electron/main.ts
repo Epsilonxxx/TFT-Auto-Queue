@@ -3,6 +3,11 @@ import { app, BrowserWindow, globalShortcut, ipcMain, Menu, Tray, nativeImage } 
 import { AutoQueueService } from "./services/autoQueueService";
 import { getLogHistory, log, onLog } from "./utils/logger";
 
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+}
+
 const service = new AutoQueueService();
 let tray: Tray | null = null;
 let win: BrowserWindow | null = null;
@@ -63,7 +68,8 @@ function updateTray(): void {
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: `Status: ${status}`, enabled: false },
-      { label: `Cycles: ${snap.cycleCount}`, enabled: false },
+      { label: `Session Cycles: ${snap.sessionCycleCount}`, enabled: false },
+      { label: `Total Cycles: ${snap.totalCycleCount}`, enabled: false },
       {
         label: snap.enabled ? "Stop (F1)" : "Start (F1)",
         click: () => {
@@ -142,6 +148,17 @@ async function bootstrap(): Promise<void> {
 
 app.whenReady().then(() => {
   void bootstrap();
+});
+
+app.on("second-instance", () => {
+  if (!win) {
+    return;
+  }
+  if (win.isMinimized()) {
+    win.restore();
+  }
+  win.show();
+  win.focus();
 });
 
 app.on("will-quit", async () => {
