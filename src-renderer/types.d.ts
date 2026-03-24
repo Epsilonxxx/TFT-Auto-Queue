@@ -9,7 +9,6 @@ export type ServiceSnapshot = {
 
 export type InitialData = {
   state: ServiceSnapshot;
-  logs: string[];
 };
 
 declare global {
@@ -18,7 +17,6 @@ declare global {
       toggle: () => Promise<ServiceSnapshot>;
       getInitialData: () => Promise<InitialData>;
       onState: (listener: (state: ServiceSnapshot) => void) => () => void;
-      onLog: (listener: (line: string) => void) => () => void;
     };
   }
 }

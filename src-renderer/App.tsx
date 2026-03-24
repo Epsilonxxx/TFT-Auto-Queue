@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Box,
   Button,
@@ -21,8 +21,6 @@ import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
 import StopCircleRoundedIcon from "@mui/icons-material/StopCircleRounded";
 import styled from "styled-components";
 import type { ServiceSnapshot } from "./types";
-
-const LOG_LIMIT = 50;
 
 const theme = createTheme({
   palette: {
@@ -63,29 +61,11 @@ const theme = createTheme({
 
 const PageWrap = styled.div`
   height: 100vh;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
   padding: 16px 0;
 `;
-
-const HeaderCard = styled(Card)`
-  margin-bottom: 24px;
-`;
-
-const LogsPanel = styled(Box)`
-  height: 288px;
-  border-radius: 14px;
-  border: 1px solid #d8e1ef;
-  background: linear-gradient(180deg, #0f172a 0%, #111c34 100%);
-  color: #dbe7ff;
-  padding: 16px 18px;
-  font-size: 12px;
-  line-height: 1.65;
-  overflow: hidden;
-  white-space: pre-wrap;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), inset 0 -1px 0 rgba(15, 23, 42, 0.25);
-  margin-bottom: 8px;
-`;
-
 const StatIconBox = styled(Box)`
   width: 36px;
   height: 36px;
@@ -124,7 +104,18 @@ function StatCard({
           </Typography>
           <StatIconBox>{icon}</StatIconBox>
         </Stack>
-        <Typography variant="h5">{value}</Typography>
+        <Typography
+          variant="h5"
+          sx={{
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap"
+          }}
+          title={value}
+        >
+          {value}
+        </Typography>
       </CardContent>
     </Card>
   );
@@ -132,7 +123,6 @@ function StatCard({
 
 export function App() {
   const [state, setState] = useState<ServiceSnapshot>(emptyState);
-  const [logs, setLogs] = useState<string[]>([]);
   const [toggling, setToggling] = useState(false);
 
   useEffect(() => {
@@ -142,29 +132,38 @@ export function App() {
         return;
       }
       setState(data.state);
-      setLogs(data.logs.slice(-LOG_LIMIT));
     });
 
     const offState = window.tftApi.onState((next) => setState(next));
-    const offLog = window.tftApi.onLog((line) => {
-      setLogs((prev) => {
-        const next = [...prev, line];
-        if (next.length > LOG_LIMIT) {
-          next.splice(0, next.length - LOG_LIMIT);
-        }
-        return next;
-      });
-    });
-
     return () => {
       mounted = false;
       offState();
-      offLog();
     };
   }, []);
 
   const statusLabel = state.enabled ? "Running" : "Stopped";
-  const logContent = useMemo(() => logs.slice(-12).join("\n"), [logs]);
+  const stats = [
+    {
+      title: "Queue",
+      value: state.queueName,
+      icon: <SportsEsportsRoundedIcon fontSize="small" />
+    },
+    {
+      title: "Phase",
+      value: state.phase || "-",
+      icon: <TimelineRoundedIcon fontSize="small" />
+    },
+    {
+      title: "Current Session",
+      value: String(state.sessionCycleCount),
+      icon: <RepeatRoundedIcon fontSize="small" />
+    },
+    {
+      title: "Total Runs",
+      value: String(state.totalCycleCount),
+      icon: <FunctionsRoundedIcon fontSize="small" />
+    }
+  ];
 
   const onToggle = async () => {
     if (toggling) {
@@ -181,12 +180,18 @@ export function App() {
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
-      <PageWrap>
+      <PageWrap className="app-scroll">
         <Container
           maxWidth="lg"
-          sx={{ height: "100%", display: "flex", flexDirection: "column", gap: 2 }}
+          sx={{
+            minHeight: "100%",
+            display: "flex",
+            flexDirection: "column",
+            gap: 2,
+            py: 1
+          }}
         >
-          <HeaderCard>
+          <Card>
             <CardContent sx={{ p: 3 }}>
               <Stack
                 direction={{ xs: "column", md: "row" }}
@@ -194,16 +199,19 @@ export function App() {
                 justifyContent="space-between"
                 alignItems={{ xs: "flex-start", md: "center" }}
               >
-                <Box>
-                  <Typography variant="h5">TFT Auto Queue</Typography>
-                </Box>
+                <Typography variant="h5">TFT Auto Queue</Typography>
 
-                <Stack direction="row" spacing={1.5} alignItems="center">
+                <Stack
+                  direction={{ xs: "column", sm: "row" }}
+                  spacing={1.5}
+                  alignItems={{ xs: "stretch", sm: "center" }}
+                  sx={{ width: { xs: "100%", md: "auto" } }}
+                >
                   <Chip
                     label={statusLabel}
                     color={state.enabled ? "success" : "default"}
                     variant={state.enabled ? "filled" : "outlined"}
-                    sx={{ fontWeight: 600 }}
+                    sx={{ fontWeight: 600, alignSelf: { xs: "flex-start", sm: "center" } }}
                   />
                   <Button
                     variant="contained"
@@ -219,14 +227,14 @@ export function App() {
                         <PlayArrowRoundedIcon />
                       )
                     }
-                    sx={{ minWidth: 220 }}
+                    sx={{ minWidth: { xs: "100%", sm: 220 } }}
                   >
                     {toggling ? "Applying..." : state.enabled ? "Stop Auto Queue (F1)" : "Start Auto Queue (F1)"}
                   </Button>
                 </Stack>
               </Stack>
             </CardContent>
-          </HeaderCard>
+          </Card>
 
           <Box
             sx={{
@@ -239,33 +247,12 @@ export function App() {
               }
             }}
           >
-            <Box>
-              <StatCard title="Queue" value={state.queueName} icon={<SportsEsportsRoundedIcon fontSize="small" />} />
-            </Box>
-            <Box>
-              <StatCard title="Phase" value={state.phase || "-"} icon={<TimelineRoundedIcon fontSize="small" />} />
-            </Box>
-            <Box>
-              <StatCard
-                title="Current Session"
-                value={String(state.sessionCycleCount)}
-                icon={<RepeatRoundedIcon fontSize="small" />}
-              />
-            </Box>
-            <Box>
-              <StatCard
-                title="Total Runs"
-                value={String(state.totalCycleCount)}
-                icon={<FunctionsRoundedIcon fontSize="small" />}
-              />
-            </Box>
+            {stats.map((item) => (
+              <Box key={item.title}>
+                <StatCard title={item.title} value={item.value} icon={item.icon} />
+              </Box>
+            ))}
           </Box>
-
-          <Card sx={{ flex: 1, minHeight: 0 }}>
-            <CardContent sx={{ p: 2.5, "&:last-child": { pb: 2.5 } }}>
-              <LogsPanel>{logContent || "No logs yet."}</LogsPanel>
-            </CardContent>
-          </Card>
         </Container>
       </PageWrap>
     </ThemeProvider>

@@ -1,7 +1,7 @@
 import path from "node:path";
 import { app, BrowserWindow, globalShortcut, ipcMain, Menu, Tray, nativeImage } from "electron";
 import { AutoQueueService } from "./services/autoQueueService";
-import { getLogHistory, log, onLog } from "./utils/logger";
+import { log } from "./utils/logger";
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
@@ -11,7 +11,7 @@ if (!gotSingleInstanceLock) {
 const service = new AutoQueueService();
 let tray: Tray | null = null;
 let win: BrowserWindow | null = null;
-let disposeLogHook: (() => void) | null = null;
+let stateBroadcastTimer: NodeJS.Timeout | null = null;
 let quitting = false;
 
 function icon(): Electron.NativeImage {
@@ -34,10 +34,10 @@ function icon(): Electron.NativeImage {
 
 function createWindow(): void {
   win = new BrowserWindow({
-    width: 1100,
-    height: 760,
+    width: 1040,
+    height: 560,
     minWidth: 360,
-    minHeight: 560,
+    minHeight: 420,
     autoHideMenuBar: true,
     backgroundColor: "#f6f8fb",
     webPreferences: {
@@ -125,8 +125,7 @@ function registerIpc(): void {
   });
   ipcMain.handle("initial-data", () => {
     return {
-      state: service.getSnapshot(),
-      logs: getLogHistory()
+      state: service.getSnapshot()
     };
   });
 }
@@ -138,12 +137,11 @@ async function bootstrap(): Promise<void> {
   registerIpc();
   registerHotkey();
   updateTray();
-
-  disposeLogHook = onLog((line) => {
-    win?.webContents.send("log", line);
+  broadcastState();
+  stateBroadcastTimer = setInterval(() => {
     updateTray();
     broadcastState();
-  });
+  }, 1000);
 }
 
 app.whenReady().then(() => {
@@ -164,7 +162,10 @@ app.on("second-instance", () => {
 app.on("will-quit", async () => {
   quitting = true;
   globalShortcut.unregisterAll();
-  disposeLogHook?.();
+  if (stateBroadcastTimer) {
+    clearInterval(stateBroadcastTimer);
+    stateBroadcastTimer = null;
+  }
   await service.stop();
 });
 
