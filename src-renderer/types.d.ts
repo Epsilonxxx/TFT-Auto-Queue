@@ -1,3 +1,18 @@
+export type AppLanguage = "zh-CN" | "en-US";
+
+export type AppSettings = {
+  language: AppLanguage;
+  queueId: number | null;
+  autoCancelOnDisable: boolean;
+  postGameDelayMinMs: number;
+  postGameDelayMaxMs: number;
+  queueRetryBlockMs: number;
+  homeResetCooldownMs: number;
+  reconnectCooldownMs: number;
+  cycleReconnectTimeoutMs: number;
+  pollIntervalMs: number;
+};
+
 export type ServiceSnapshot = {
   enabled: boolean;
   queueId: number;
@@ -9,6 +24,7 @@ export type ServiceSnapshot = {
 
 export type InitialData = {
   state: ServiceSnapshot;
+  settings: AppSettings;
 };
 
 declare global {
@@ -16,6 +32,7 @@ declare global {
     tftApi: {
       toggle: () => Promise<ServiceSnapshot>;
       getInitialData: () => Promise<InitialData>;
+      saveSettings: (settings: Partial<AppSettings>) => Promise<AppSettings>;
       onState: (listener: (state: ServiceSnapshot) => void) => () => void;
     };
   }

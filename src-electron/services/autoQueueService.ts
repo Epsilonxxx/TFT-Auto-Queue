@@ -1,10 +1,20 @@
-import dotenv from "dotenv";
 import { AxiosError } from "axios";
+import {
+  AppConfigStore,
+  MemoryConfigStore,
+  createDefaultAppConfig,
+  normalizeAppConfig,
+  type AppSettings
+} from "../config/appConfig";
+import type { GameflowPhase, LcuClient } from "../lcu/client";
+import { LcuClient as RiotLcuClient } from "../lcu/client";
+import type { LcuCredentials } from "../lcu/discovery";
 import { discoverLcuCredentials } from "../lcu/discovery";
-import { GameflowPhase, LcuClient } from "../lcu/client";
 import { log } from "../utils/logger";
-
-dotenv.config();
+import { SystemErrorRecovery } from "../utils/systemErrorRecovery";
+import { PhaseMonitor, type PhaseObservation } from "./phaseMonitor";
+import { QueueStateMachine, type QueueFlowContext } from "./queueFlowStates";
+import { QueueSessionState } from "./queueSessionState";
 
 type Lobby = { queueId: number };
 
@@ -28,8 +38,33 @@ export type ServiceSnapshot = {
   sessionCycleCount: number;
 };
 
+export type LcuClientLike = Pick<LcuClient, "get" | "post" | "delete" | "connectGameflowEvents" | "close">;
+
+type IntervalHandle = ReturnType<typeof setInterval>;
+type SnapshotListener = (snapshot: ServiceSnapshot) => void;
+
+const ATTEMPT_JOIN_QUEUE_RETRY_MS = 5 * 60 * 1000;
+const RECONNECT_LOBBY_FALLBACK_MS = 15 * 1000;
+
+export type AutoQueueServiceDependencies = {
+  configStore?: AppConfigStore;
+  discoverCredentials?: () => LcuCredentials;
+  createLcuClient?: (credentials: LcuCredentials) => LcuClientLike;
+  logger?: (message: string) => void;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+  randomBetween?: (min: number, max: number) => number;
+  setIntervalFn?: (callback: () => void, delay: number) => IntervalHandle;
+  clearIntervalFn?: (handle: IntervalHandle) => void;
+  dismissCrashDialog?: () => Promise<"dismissed" | "closed" | "not_found" | "not_match" | "error">;
+};
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function randomBetween(min: number, max: number): number {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
 function isHttpStatus(err: unknown, status: number): boolean {
@@ -37,13 +72,14 @@ function isHttpStatus(err: unknown, status: number): boolean {
 }
 
 function normalizeText(input: string): string {
-  return input.toLowerCase().replace(/[’']/g, "").replace(/[^a-z0-9\u4e00-\u9fff]+/g, "");
+  return input.toLowerCase().replace(/['"`]/g, "").replace(/[^a-z0-9\u4e00-\u9fff]+/g, "");
 }
 
 function isTockersTrialsQueue(queue: GameQueue): boolean {
   if (queue.id === 1220) {
     return true;
   }
+
   const raw = [
     queue.name ?? "",
     queue.shortName ?? "",
@@ -54,17 +90,15 @@ function isTockersTrialsQueue(queue: GameQueue): boolean {
     queue.map ?? ""
   ].join(" ");
   const normalized = normalizeText(raw);
-  return raw.includes("发条鸟的试炼") || normalized.includes("tockerstrials");
-}
 
-function randomBetween(min: number, max: number): number {
-  return Math.floor(Math.random() * (max - min + 1)) + min;
+  return raw.includes("\u53d1\u6761\u9e1f\u7684\u8bd5\u70bc") || normalized.includes("tockerstrials");
 }
 
 function extractErrorText(err: unknown): string {
   if (!(err instanceof AxiosError)) {
     return String(err ?? "");
   }
+
   const data = err.response?.data;
   if (typeof data === "string") {
     return data;
@@ -75,65 +109,137 @@ function extractErrorText(err: unknown): string {
   return err.message ?? "";
 }
 
-function isQueueLimitedError(err: unknown): boolean {
-  const text = extractErrorText(err).toLowerCase();
-  return (
-    text.includes("无法进入匹配队列，请稍后再试") ||
-    text.includes("unable to enter matchmaking queue") ||
-    text.includes("please try again later")
-  );
+function hasTextMatch(input: string, patterns: string[]): boolean {
+  const raw = input.toLowerCase();
+  const normalized = normalizeText(input);
+
+  return patterns.some((pattern) => raw.includes(pattern.toLowerCase()) || normalized.includes(normalizeText(pattern)));
 }
 
-function isPlayersNotReadyError(err: unknown): boolean {
-  const text = extractErrorText(err).toLowerCase();
-  return (
-    text.includes("players are not ready") ||
-    text.includes("玩家尚未完成准备") ||
-    text.includes("player has not finished ready")
-  );
+function isConnectionLostText(input: string): boolean {
+  return hasTextMatch(input, [
+    "connection lost",
+    "unable to connect to server",
+    "unable to connect to the server",
+    "cannot connect to server",
+    "cannot connect to the server",
+    "disconnected from server",
+    "\u8fde\u63a5\u65ad\u5f00",
+    "\u65e0\u6cd5\u8fde\u63a5\u670d\u52a1\u5668",
+    "\u65e0\u6cd5\u8fde\u63a5\u5230\u670d\u52a1\u5668",
+    "\u4e0e\u670d\u52a1\u5668\u7684\u8fde\u63a5\u5df2\u65ad\u5f00"
+  ]);
+}
+
+export function isQueueLimitedError(err: unknown): boolean {
+  return hasTextMatch(extractErrorText(err), [
+    "\u65e0\u6cd5\u8fdb\u5165\u5339\u914d\u961f\u5217",
+    "\u8bf7\u7a0d\u540e\u518d\u8bd5",
+    "unable to enter matchmaking queue",
+    "please try again later"
+  ]);
+}
+
+export function isAttemptToJoinQueueFailedError(err: unknown): boolean {
+  return hasTextMatch(extractErrorText(err), [
+    "attempt to join queue failed",
+    "an unexpected error has occurred while attempting to join the queue",
+    "unexpected error has occurred while attempting to join the queue",
+    "\u52a0\u5165\u961f\u5217\u5931\u8d25",
+    "\u5c1d\u8bd5\u52a0\u5165\u961f\u5217\u65f6\u53d1\u751f\u610f\u5916\u9519\u8bef"
+  ]);
+}
+
+export function isPlayersNotReadyError(err: unknown): boolean {
+  return hasTextMatch(extractErrorText(err), [
+    "players are not ready",
+    "\u73a9\u5bb6\u5c1a\u672a\u5b8c\u6210\u51c6\u5907",
+    "player has not finished ready"
+  ]);
 }
 
 export class AutoQueueService {
-  private lcu: LcuClient | null = null;
+  private lcu: LcuClientLike | null = null;
   private enabled = false;
-  private processing = false;
-  private readonly configuredQueueId: number | null;
-  private readonly autoCancelOnDisable: boolean;
-  private pollTimer: NodeJS.Timeout | null = null;
-  private lastPhase: GameflowPhase | null = null;
-  private lastPostGameActionAt = 0;
-  private inCurrentMatch = false;
-
-  private totalCycleCount = 0;
-  private sessionCycleCount = 0;
-
+  private handlingObservation = false;
+  private pendingObservation: PhaseObservation | null = null;
+  private reconnecting = false;
+  private consecutiveTickFailures = 0;
+  private phaseMonitor: PhaseMonitor | null = null;
+  private readonly listeners = new Set<SnapshotListener>();
+  private readonly configStore: AppConfigStore;
+  private readonly defaults = createDefaultAppConfig();
+  private readonly stateMachine = new QueueStateMachine();
+  private settings: AppSettings;
+  private session: QueueSessionState;
   private activeQueueId = 1220;
   private activeQueueName = "Tocker's Trials";
 
-  private readonly postGameDelayMinMs = 1000;
-  private readonly postGameDelayMaxMs = 2000;
-  private pendingPostGameSearchDelay = false;
+  private readonly discoverCredentials: () => LcuCredentials;
+  private readonly createLcuClient: (credentials: LcuCredentials) => LcuClientLike;
+  private readonly logger: (message: string) => void;
+  private readonly sleep: (ms: number) => Promise<void>;
+  private readonly now: () => number;
+  private readonly randomBetween: (min: number, max: number) => number;
+  private readonly setIntervalFn: (callback: () => void, delay: number) => IntervalHandle;
+  private readonly clearIntervalFn: (handle: IntervalHandle) => void;
+  private readonly dismissCrashDialog: () => Promise<"dismissed" | "closed" | "not_found" | "not_match" | "error">;
 
-  private readonly queueRetryBlockMs = 3 * 60 * 1000;
-  private searchBlockedUntil = 0;
-  private lastBlockedLogAt = 0;
+  constructor(dependencies: AutoQueueServiceDependencies = {}) {
+    this.configStore = dependencies.configStore ?? new MemoryConfigStore(this.defaults);
+    const persisted = this.configStore.get();
 
-  private lastHomeResetAt = 0;
-  private readonly homeResetCooldownMs = 10 * 1000;
+    this.settings = { ...persisted.settings };
+    this.session = new QueueSessionState(persisted.stats);
 
-  private readonly reconnectCooldownMs = 5000;
-  private reconnecting = false;
-  private consecutiveTickFailures = 0;
-  private lastReconnectAt = 0;
-
-  constructor() {
-    const queueIdRaw = (process.env.TFT_QUEUE_ID ?? "").trim();
-    this.configuredQueueId = queueIdRaw ? Number(queueIdRaw) : null;
-    this.autoCancelOnDisable = (process.env.AUTO_CANCEL_ON_DISABLE ?? "true").toLowerCase() === "true";
+    this.discoverCredentials = dependencies.discoverCredentials ?? discoverLcuCredentials;
+    this.createLcuClient = dependencies.createLcuClient ?? ((credentials) => new RiotLcuClient(credentials));
+    this.logger = dependencies.logger ?? log;
+    this.sleep = dependencies.sleep ?? sleep;
+    this.now = dependencies.now ?? (() => Date.now());
+    this.randomBetween = dependencies.randomBetween ?? randomBetween;
+    this.setIntervalFn = dependencies.setIntervalFn ?? setInterval;
+    this.clearIntervalFn = dependencies.clearIntervalFn ?? clearInterval;
+    this.dismissCrashDialog =
+      dependencies.dismissCrashDialog ?? (() => new SystemErrorRecovery().dismissLeagueCrashDialog());
+    this.syncActiveQueuePreview();
   }
 
   get isEnabled(): boolean {
     return this.enabled;
+  }
+
+  getSettings(): AppSettings {
+    return { ...this.settings };
+  }
+
+  updateSettings(patch: Partial<AppSettings>): AppSettings {
+    const nextConfig = this.configStore.update((current) =>
+      normalizeAppConfig(
+        {
+          ...current,
+          settings: {
+            ...current.settings,
+            ...patch
+          }
+        },
+        this.defaults
+      )
+    );
+
+    this.settings = { ...nextConfig.settings };
+    this.syncActiveQueuePreview();
+    this.phaseMonitor?.setPollInterval(this.settings.pollIntervalMs);
+    this.emitSnapshot();
+    return this.getSettings();
+  }
+
+  subscribe(listener: SnapshotListener): () => void {
+    this.listeners.add(listener);
+    listener(this.getSnapshot());
+    return () => {
+      this.listeners.delete(listener);
+    };
   }
 
   getSnapshot(): ServiceSnapshot {
@@ -141,9 +247,9 @@ export class AutoQueueService {
       enabled: this.enabled,
       queueId: this.activeQueueId,
       queueName: this.activeQueueName,
-      phase: this.lastPhase ?? "Unknown",
-      totalCycleCount: this.totalCycleCount,
-      sessionCycleCount: this.sessionCycleCount
+      phase: this.session.phase ?? "Unknown",
+      totalCycleCount: this.session.totalCycleCount,
+      sessionCycleCount: this.session.sessionCycleCount
     };
   }
 
@@ -152,6 +258,7 @@ export class AutoQueueService {
       await this.stop();
       return false;
     }
+
     await this.start();
     return true;
   }
@@ -161,31 +268,29 @@ export class AutoQueueService {
       return;
     }
 
-    await this.initializeLcuAndQueue();
+    this.restoreConfig();
+    this.session.resetForStart();
     this.enabled = true;
-    this.sessionCycleCount = 0;
-    this.connectPhaseEvents();
+    this.persistStats();
 
-    this.pollTimer = setInterval(() => {
-      void this.tick();
-    }, 2500);
+    await this.initializeLcuAndQueue();
+    this.bindPhaseMonitor();
 
-    log(`Enabled for queue: ${this.activeQueueName}`);
-    await this.tick();
+    this.logger(`Enabled for queue: ${this.activeQueueName}`);
+    this.emitSnapshot();
+    await this.tickOnce();
   }
 
   async stop(): Promise<void> {
     if (!this.enabled) {
       return;
     }
+
     this.enabled = false;
+    this.phaseMonitor?.stop();
+    this.phaseMonitor = null;
 
-    if (this.pollTimer) {
-      clearInterval(this.pollTimer);
-      this.pollTimer = null;
-    }
-
-    if (this.autoCancelOnDisable && this.lcu) {
+    if (this.settings.autoCancelOnDisable && this.lcu) {
       try {
         await this.lcu.delete("/lol-lobby/v2/lobby/matchmaking/search");
       } catch {
@@ -195,92 +300,157 @@ export class AutoQueueService {
 
     this.lcu?.close();
     this.lcu = null;
-    this.lastPhase = null;
-    this.lastPostGameActionAt = 0;
-    this.inCurrentMatch = false;
-    this.pendingPostGameSearchDelay = false;
-    this.searchBlockedUntil = 0;
-    this.lastBlockedLogAt = 0;
-    this.consecutiveTickFailures = 0;
+    this.handlingObservation = false;
+    this.pendingObservation = null;
     this.reconnecting = false;
-    log("Disabled.");
+    this.consecutiveTickFailures = 0;
+    this.session.resetForStop();
+    this.syncActiveQueuePreview();
+    this.persistStats();
+    this.emitSnapshot();
+    this.logger("Disabled.");
   }
 
-  private async tick(): Promise<void> {
+  async tickOnce(): Promise<void> {
+    if (!this.enabled) {
+      return;
+    }
+
+    await this.phaseMonitor?.tickOnce();
+  }
+
+  private restoreConfig(): void {
+    const persisted = this.configStore.get();
+    this.settings = { ...persisted.settings };
+    this.session.restoreStats(persisted.stats);
+    this.syncActiveQueuePreview();
+  }
+
+  private syncActiveQueuePreview(): void {
+    if (this.enabled || this.lcu) {
+      return;
+    }
+
+    if (this.settings.queueId !== null) {
+      this.activeQueueId = this.settings.queueId;
+      this.activeQueueName = "Manual Queue";
+      return;
+    }
+
+    this.activeQueueId = 1220;
+    this.activeQueueName = "Tocker's Trials";
+  }
+
+  private persistStats(): void {
+    const stats = this.session.getStats();
+    this.configStore.update((current) => ({
+      ...current,
+      settings: { ...this.settings },
+      stats
+    }));
+  }
+
+  private emitSnapshot(): void {
+    const snapshot = this.getSnapshot();
+    for (const listener of this.listeners) {
+      listener(snapshot);
+    }
+  }
+
+  private bindPhaseMonitor(): void {
+    if (!this.lcu) {
+      return;
+    }
+
+    this.phaseMonitor?.stop();
+    this.phaseMonitor = new PhaseMonitor({
+      client: this.lcu,
+      pollIntervalMs: this.settings.pollIntervalMs,
+      onPhase: (observation) => this.handleObservedPhase(observation),
+      onPollError: (error) => this.handlePhaseReadError(error),
+      setIntervalFn: this.setIntervalFn,
+      clearIntervalFn: this.clearIntervalFn
+    });
+    this.phaseMonitor.start();
+  }
+
+  private async handleObservedPhase(observation: PhaseObservation): Promise<void> {
+    if (!this.enabled) {
+      return;
+    }
+
+    if (this.handlingObservation) {
+      this.pendingObservation = observation;
+      return;
+    }
+
+    this.handlingObservation = true;
+    let nextObservation: PhaseObservation | null = observation;
+
+    try {
+      while (nextObservation) {
+        this.pendingObservation = null;
+        await this.processObservedPhase(nextObservation.phase);
+        nextObservation = this.pendingObservation;
+      }
+    } finally {
+      this.handlingObservation = false;
+    }
+  }
+
+  private async processObservedPhase(phase: GameflowPhase): Promise<void> {
     if (!this.enabled || !this.lcu) {
       return;
     }
 
-    try {
-      const phase = await this.lcu.get<GameflowPhase>("/lol-gameflow/v1/gameflow-phase");
-      this.consecutiveTickFailures = 0;
-      await this.handlePhase(phase);
-    } catch (err) {
-      this.consecutiveTickFailures += 1;
-      log(`Phase read failed: ${String(err)}`);
-      if (this.consecutiveTickFailures >= 2) {
-        await this.tryRecoverLcuConnection();
-      }
+    this.consecutiveTickFailures = 0;
+    const transition = this.session.observePhase(phase, this.now());
+
+    if (transition.phaseChanged) {
+      this.logger(`Phase: ${phase}`);
+      this.emitSnapshot();
+    }
+
+    if (transition.cycleCompleted) {
+      this.persistStats();
+      this.logger(`Cycle completed. Session=${this.session.sessionCycleCount}, Total=${this.session.totalCycleCount}`);
+      this.emitSnapshot();
+    }
+
+    await this.stateMachine.handle(phase, this.createFlowContext());
+  }
+
+  private async handlePhaseReadError(error: unknown): Promise<void> {
+    this.consecutiveTickFailures += 1;
+    this.logger(`Phase read failed: ${String(error)}`);
+    if (this.consecutiveTickFailures >= 2) {
+      await this.tryRecoverLcuConnection();
     }
   }
 
-  private async handlePhase(phase: GameflowPhase): Promise<void> {
-    if (!this.enabled || !this.lcu || this.processing) {
-      return;
-    }
-
-    if (phase !== this.lastPhase) {
-      this.lastPhase = phase;
-      log(`Phase: ${phase}`);
-    }
-
-    if (phase === "InProgress") {
-      this.inCurrentMatch = true;
-    }
-
-    if (phase === "PreEndOfGame" || phase === "EndOfGame" || phase === "WaitingForStats") {
-      if (this.inCurrentMatch) {
-        this.inCurrentMatch = false;
-        this.totalCycleCount += 1;
-        this.sessionCycleCount += 1;
-        this.pendingPostGameSearchDelay = true;
-        log(`Cycle completed. Session=${this.sessionCycleCount}, Total=${this.totalCycleCount}`);
-      }
-    } else {
-      this.lastPostGameActionAt = 0;
-    }
-
-    this.processing = true;
-    try {
-      switch (phase) {
-        case "None":
-          await this.ensureLobbyAndSearch();
-          break;
-        case "Lobby":
-          await this.ensureSearch();
-          break;
-        case "ReadyCheck":
-          await this.acceptReadyCheck();
-          break;
-        case "PreEndOfGame":
-        case "EndOfGame":
-        case "WaitingForStats":
-          await this.handlePostGamePhase();
-          break;
-        case "Reconnect":
-          await this.tryReconnectGameSession();
-          break;
-        default:
-          break;
-      }
-    } finally {
-      this.processing = false;
-    }
+  private createFlowContext(): QueueFlowContext {
+    return {
+      settings: this.settings,
+      session: this.session,
+      ensureLobbyAndSearch: () => this.ensureLobbyAndSearch(),
+      ensureSearch: () => this.ensureSearch(),
+      acceptReadyCheck: () => this.acceptReadyCheck(),
+      handlePostGame: () => this.handlePostGamePhase(),
+      handleReconnectPhase: () => this.handleReconnectPhase(),
+      tryReconnectRecovery: (reason, options) => this.tryReconnectRecovery(reason, options),
+      shouldReconnectForTimeout: () =>
+        this.session.shouldReconnectForTimeout(this.now(), this.settings.cycleReconnectTimeoutMs)
+    };
   }
 
   private async ensureLobbyAndSearch(): Promise<void> {
     await this.ensureLobby();
-    await sleep(300);
+    await this.sleep(300);
+
+    if (!this.enabled || !this.lcu) {
+      return;
+    }
+
     await this.ensureSearch();
   }
 
@@ -288,6 +458,7 @@ export class AutoQueueService {
     if (!this.lcu) {
       return;
     }
+
     try {
       await this.lcu.get<Lobby>("/lol-lobby/v2/lobby");
       return;
@@ -296,8 +467,9 @@ export class AutoQueueService {
         throw err;
       }
     }
+
     await this.lcu.post("/lol-lobby/v2/lobby", { queueId: this.activeQueueId });
-    log("Lobby created.");
+    this.logger("Lobby created.");
   }
 
   private async ensureSearch(): Promise<void> {
@@ -305,43 +477,52 @@ export class AutoQueueService {
       return;
     }
 
-    const now = Date.now();
-    if (now < this.searchBlockedUntil) {
-      if (now - this.lastBlockedLogAt > 15000) {
-        const leftSec = Math.ceil((this.searchBlockedUntil - now) / 1000);
-        log(`Queue retry blocked, waiting ${leftSec}s.`);
-        this.lastBlockedLogAt = now;
+    const now = this.now();
+    if (this.session.isSearchBlocked(now)) {
+      if (this.session.shouldLogBlockedSearch(now, 15000)) {
+        const leftSec = Math.ceil(this.session.getSearchBlockRemainingMs(now) / 1000);
+        this.logger(`Queue retry blocked, waiting ${leftSec}s.`);
+        this.session.markBlockedSearchLog(now);
       }
       return;
     }
 
-    if (this.pendingPostGameSearchDelay) {
-      const delayMs = randomBetween(this.postGameDelayMinMs, this.postGameDelayMaxMs);
-      log(`Post-game requeue delay: ${delayMs}ms.`);
-      await sleep(delayMs);
-      this.pendingPostGameSearchDelay = false;
+    if (this.session.consumePendingPostGameSearchDelay()) {
+      const delayMs = this.randomBetween(this.settings.postGameDelayMinMs, this.settings.postGameDelayMaxMs);
+      this.logger(`Post-game requeue delay: ${delayMs}ms.`);
+      await this.sleep(delayMs);
+
+      if (!this.enabled || !this.lcu) {
+        return;
+      }
     }
 
     try {
       await this.lcu.post("/lol-lobby/v2/lobby/matchmaking/search");
-      log("Search started.");
+      this.logger("Search started.");
     } catch (err) {
       if (isPlayersNotReadyError(err)) {
-        log("Players are not ready. Leaving current lobby and retrying.");
+        this.logger("Players are not ready. Leaving current lobby and retrying.");
         await this.recoverToHomeAndRetry();
         return;
       }
 
+      if (isAttemptToJoinQueueFailedError(err)) {
+        this.session.blockSearch(this.now(), ATTEMPT_JOIN_QUEUE_RETRY_MS);
+        this.logger("Join queue failed unexpectedly. Retry after 5 minutes.");
+        return;
+      }
+
       if (isQueueLimitedError(err)) {
-        this.searchBlockedUntil = Date.now() + this.queueRetryBlockMs;
-        this.lastBlockedLogAt = 0;
-        log("Queue limited by server. Retry after 3 minutes.");
+        this.session.blockSearch(this.now(), this.settings.queueRetryBlockMs);
+        this.logger("Queue limited by server. Retry after 3 minutes.");
         return;
       }
 
       if (isHttpStatus(err, 400) || isHttpStatus(err, 409) || isHttpStatus(err, 429)) {
         return;
       }
+
       throw err;
     }
   }
@@ -351,20 +532,24 @@ export class AutoQueueService {
       return;
     }
 
-    const now = Date.now();
-    if (now - this.lastHomeResetAt < this.homeResetCooldownMs) {
+    const now = this.now();
+    if (!this.session.canResetHome(now, this.settings.homeResetCooldownMs)) {
       return;
     }
-    this.lastHomeResetAt = now;
+    this.session.markHomeReset(now);
 
     try {
       await this.lcu.delete("/lol-lobby/v2/lobby");
-      log("Current lobby closed.");
+      this.logger("Current lobby closed.");
     } catch {
-      // ignore if lobby already gone
+      // ignore if lobby already disappeared
     }
 
-    await sleep(1200);
+    await this.sleep(1200);
+    if (!this.enabled || !this.lcu) {
+      return;
+    }
+
     await this.ensureLobbyAndSearch();
   }
 
@@ -372,9 +557,10 @@ export class AutoQueueService {
     if (!this.lcu) {
       return;
     }
+
     try {
       await this.lcu.post("/lol-matchmaking/v1/ready-check/accept");
-      log("Ready-check accepted.");
+      this.logger("Ready-check accepted.");
     } catch (err) {
       if (isHttpStatus(err, 404)) {
         return;
@@ -383,40 +569,86 @@ export class AutoQueueService {
     }
   }
 
+  private async handleReconnectPhase(): Promise<void> {
+    if (!this.lcu) {
+      return;
+    }
+
+    if (await this.hasConnectionLostSignal()) {
+      await this.returnToLobbyAndRetry("Server connection lost. Returning to lobby and restarting queue.");
+      return;
+    }
+
+    if (this.session.shouldReturnToLobbyFromReconnect(this.now(), RECONNECT_LOBBY_FALLBACK_MS)) {
+      await this.returnToLobbyAndRetry("Reconnect phase stayed too long. Returning to lobby and restarting queue.");
+      return;
+    }
+
+    await this.tryReconnectRecovery("Reconnect state detected. Attempting automatic recovery.");
+  }
+
   private async handlePostGamePhase(): Promise<void> {
     if (!this.lcu) {
       return;
     }
-    const now = Date.now();
-    if (now - this.lastPostGameActionAt < 2000) {
+
+    const now = this.now();
+    if (!this.session.canRunPostGameAction(now, 2000)) {
       return;
     }
-    this.lastPostGameActionAt = now;
+    this.session.markPostGameAction(now);
 
     const playAgain = await this.tryPost("/lol-lobby/v2/play-again");
     if (playAgain) {
-      log("Post-game: play-again sent.");
+      this.logger("Post-game: play-again sent.");
       return;
     }
 
     const dismiss = await this.tryPost("/lol-end-of-game/v1/state/dismiss-stats");
     if (dismiss) {
-      log("Post-game: dismiss-stats sent.");
+      this.logger("Post-game: dismiss-stats sent.");
     }
+  }
+
+  private async tryReconnectRecovery(
+    reason: string,
+    options: {
+      resetCycleTimer?: boolean;
+    } = {}
+  ): Promise<void> {
+    if (!this.lcu) {
+      return;
+    }
+
+    const now = this.now();
+    if (!this.session.canReconnect(now, this.settings.reconnectCooldownMs)) {
+      return;
+    }
+
+    this.session.markReconnect(now, options);
+    this.logger(reason);
+    await this.tryDismissCrashDialog();
+    await this.tryReconnectGameSession();
   }
 
   private async tryReconnectGameSession(): Promise<void> {
     if (!this.lcu) {
       return;
     }
+
     try {
       await this.lcu.post("/lol-gameflow/v1/reconnect");
-      log("Reconnect command sent.");
+      this.logger("Reconnect command sent.");
     } catch (err) {
+      if (isConnectionLostText(extractErrorText(err))) {
+        await this.returnToLobbyAndRetry("Reconnect failed because the client cannot reach the server. Returning to lobby.");
+        return;
+      }
+
       if (isHttpStatus(err, 400) || isHttpStatus(err, 404) || isHttpStatus(err, 409) || isHttpStatus(err, 422)) {
         return;
       }
-      log(`Reconnect request failed: ${String(err)}`);
+      this.logger(`Reconnect request failed: ${String(err)}`);
     }
   }
 
@@ -424,6 +656,7 @@ export class AutoQueueService {
     if (!this.lcu) {
       return false;
     }
+
     try {
       await this.lcu.post(path);
       return true;
@@ -431,65 +664,128 @@ export class AutoQueueService {
       if (isHttpStatus(err, 400) || isHttpStatus(err, 404) || isHttpStatus(err, 409) || isHttpStatus(err, 422)) {
         return false;
       }
-      log(`Request failed ${path}: ${String(err)}`);
+      this.logger(`Request failed ${path}: ${String(err)}`);
       return false;
     }
   }
 
   private async resolveQueue(): Promise<{ id: number; name: string }> {
-    if (this.configuredQueueId && Number.isFinite(this.configuredQueueId)) {
-      return { id: this.configuredQueueId, name: "Manual Queue" };
+    if (this.settings.queueId !== null && Number.isFinite(this.settings.queueId)) {
+      return { id: this.settings.queueId, name: "Manual Queue" };
     }
+
     if (!this.lcu) {
       return { id: 1220, name: "Tocker's Trials" };
     }
+
     const queues = await this.lcu.get<GameQueue[]>("/lol-game-queues/v1/queues");
-    const found = queues.find((q) => isTockersTrialsQueue(q));
+    const found = queues.find((queue) => isTockersTrialsQueue(queue));
     if (!found) {
       throw new Error("Tocker's Trials queue not found.");
     }
+
     return { id: found.id, name: found.name ?? found.shortName ?? "Tocker's Trials" };
   }
 
   private async initializeLcuAndQueue(): Promise<void> {
-    const creds = discoverLcuCredentials();
-    this.lcu = new LcuClient(creds);
+    const credentials = this.discoverCredentials();
+    this.lcu = this.createLcuClient(credentials);
+
     const queue = await this.resolveQueue();
     this.activeQueueId = queue.id;
     this.activeQueueName = queue.name;
-  }
-
-  private connectPhaseEvents(): void {
-    if (!this.lcu) {
-      return;
-    }
-    this.lcu.connectGameflowEvents((phase) => {
-      void this.handlePhase(phase);
-    });
+    this.emitSnapshot();
   }
 
   private async tryRecoverLcuConnection(): Promise<void> {
     if (!this.enabled || this.reconnecting) {
       return;
     }
-    const now = Date.now();
-    if (now - this.lastReconnectAt < this.reconnectCooldownMs) {
+
+    const now = this.now();
+    if (!this.session.canReconnect(now, this.settings.reconnectCooldownMs)) {
       return;
     }
 
-    this.lastReconnectAt = now;
+    this.session.markReconnect(now);
     this.reconnecting = true;
+
     try {
-      log("LCU connection unstable, trying recovery...");
+      this.logger("LCU connection unstable, trying recovery...");
+      await this.tryDismissCrashDialog();
+      this.phaseMonitor?.stop();
+      this.phaseMonitor = null;
       this.lcu?.close();
       await this.initializeLcuAndQueue();
-      this.connectPhaseEvents();
+      this.bindPhaseMonitor();
+      await this.tryReconnectGameSession();
       this.consecutiveTickFailures = 0;
-      log("LCU connection recovered.");
+      this.logger("LCU connection recovered.");
     } catch (err) {
-      log(`LCU recovery failed: ${String(err)}`);
+      this.logger(`LCU recovery failed: ${String(err)}`);
     } finally {
       this.reconnecting = false;
     }
+  }
+
+  private async tryDismissCrashDialog(): Promise<void> {
+    const result = await this.dismissCrashDialog();
+    if (result === "dismissed" || result === "closed") {
+      this.logger("Detected League crash dialog. Dismissed it before reconnecting.");
+      await this.sleep(300);
+    }
+  }
+
+  private async hasConnectionLostSignal(): Promise<boolean> {
+    if (!this.lcu) {
+      return false;
+    }
+
+    const apiPaths = [
+      "/lol-game-session/v1/reconnectInfo",
+      "/lol-gameflow/v1/session",
+      "/lol-lobby/v2/notifications",
+      "/lol-gameflow/v1/availability"
+    ];
+
+    for (const path of apiPaths) {
+      try {
+        const payload = await this.lcu.get<unknown>(path);
+        if (isConnectionLostText(typeof payload === "string" ? payload : JSON.stringify(payload))) {
+          return true;
+        }
+      } catch {
+        // ignore unsupported or unavailable endpoints
+      }
+    }
+
+    return false;
+  }
+
+  private async returnToLobbyAndRetry(reason: string): Promise<void> {
+    if (!this.lcu) {
+      return;
+    }
+
+    const now = this.now();
+    if (!this.session.canResetHome(now, this.settings.homeResetCooldownMs)) {
+      return;
+    }
+
+    this.session.markHomeReset(now);
+    this.logger(reason);
+
+    await this.tryPost("/lol-gameflow/v1/ack-failed-to-launch");
+    const requestedLobby = await this.tryPost("/lol-gameflow/v1/session/request-lobby");
+    if (requestedLobby) {
+      this.logger("Requested return to lobby.");
+    }
+
+    await this.sleep(1200);
+    if (!this.enabled || !this.lcu) {
+      return;
+    }
+
+    await this.ensureLobbyAndSearch();
   }
 }

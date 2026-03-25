@@ -2,4 +2,5 @@
 dist-electron/
 dist-renderer/
 release/
+release-*/
 .env

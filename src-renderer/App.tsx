@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
+  Alert,
   Box,
   Button,
   Card,
@@ -7,7 +8,16 @@ import {
   Chip,
   Container,
   CssBaseline,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  FormControlLabel,
+  InputAdornment,
+  MenuItem,
   Stack,
+  Switch,
+  TextField,
   ThemeProvider,
   Typography,
   createTheme
@@ -19,8 +29,10 @@ import FunctionsRoundedIcon from "@mui/icons-material/FunctionsRounded";
 import AutorenewRoundedIcon from "@mui/icons-material/AutorenewRounded";
 import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
 import StopCircleRoundedIcon from "@mui/icons-material/StopCircleRounded";
+import SettingsRoundedIcon from "@mui/icons-material/SettingsRounded";
+import SaveRoundedIcon from "@mui/icons-material/SaveRounded";
 import styled from "styled-components";
-import type { ServiceSnapshot } from "./types";
+import type { AppLanguage, AppSettings, ServiceSnapshot } from "./types";
 
 const theme = createTheme({
   palette: {
@@ -55,6 +67,13 @@ const theme = createTheme({
           minHeight: 44
         }
       }
+    },
+    MuiDialog: {
+      styleOverrides: {
+        paper: {
+          borderRadius: 20
+        }
+      }
     }
   }
 });
@@ -66,6 +85,7 @@ const PageWrap = styled.div`
   scrollbar-gutter: stable;
   padding: 16px 0;
 `;
+
 const StatIconBox = styled(Box)`
   width: 36px;
   height: 36px;
@@ -86,6 +106,269 @@ const emptyState: ServiceSnapshot = {
   sessionCycleCount: 0
 };
 
+const emptySettings: AppSettings = {
+  language: "zh-CN",
+  queueId: null,
+  autoCancelOnDisable: true,
+  postGameDelayMinMs: 1000,
+  postGameDelayMaxMs: 2000,
+  queueRetryBlockMs: 180000,
+  homeResetCooldownMs: 10000,
+  reconnectCooldownMs: 5000,
+  cycleReconnectTimeoutMs: 300000,
+  pollIntervalMs: 2500
+};
+
+type SettingsFormState = {
+  language: AppLanguage;
+  queueId: string;
+  autoCancelOnDisable: boolean;
+  postGameDelayMinMs: string;
+  postGameDelayMaxMs: string;
+  queueRetryBlockSeconds: string;
+  homeResetCooldownSeconds: string;
+  reconnectCooldownSeconds: string;
+  cycleReconnectTimeoutSeconds: string;
+  pollIntervalMs: string;
+};
+
+type SettingsFormErrors = Partial<Record<keyof SettingsFormState, string>>;
+
+const translations = {
+  "zh-CN": {
+    appTitle: "TFT 自动匹配",
+    statusRunning: "运行中",
+    statusStopped: "已停止",
+    settings: "设置",
+    start: "启动自动匹配 (F1)",
+    stop: "关闭自动匹配 (F1)",
+    applying: "应用中...",
+    save: "保存设置",
+    saving: "保存中...",
+    cancel: "取消",
+    dialogTitle: "设置",
+    statsQueue: "队列",
+    statsPhase: "阶段",
+    statsSession: "本次运行",
+    statsTotal: "总次数",
+    manualQueue: "自定义队列",
+    queueTockers: "发条鸟的试炼",
+    fieldsLanguage: "界面语言",
+    fieldsQueueId: "队列 ID",
+    fieldsPollInterval: "轮询间隔",
+    fieldsPostGameDelayMin: "结算后最小延迟",
+    fieldsPostGameDelayMax: "结算后最大延迟",
+    fieldsQueueRetryBlock: "限制后等待",
+    fieldsHomeResetCooldown: "回首页冷却",
+    fieldsReconnectCooldown: "重连冷却",
+    fieldsCycleReconnectTimeout: "单局超时重连",
+    fieldsAutoCancelOnDisable: "关闭自动匹配时取消当前搜索",
+    queueIdError: "队列 ID 必须是正整数，或留空。",
+    positiveIntegerError: "请输入正整数。",
+    maxDelayError: "最大延迟必须大于或等于最小延迟。",
+    languageChinese: "简体中文",
+    languageEnglish: "English",
+    phaseUnknown: "未知",
+    unitMilliseconds: "毫秒",
+    unitSeconds: "秒",
+    phases: {
+      None: "无",
+      Lobby: "房间中",
+      Matchmaking: "匹配中",
+      ReadyCheck: "确认对局",
+      ChampSelect: "选人中",
+      InProgress: "对局中",
+      WaitingForStats: "等待结算",
+      PreEndOfGame: "结算前",
+      EndOfGame: "结算中",
+      Reconnect: "重新连接",
+      TerminatedInError: "错误中断",
+      Unknown: "未知"
+    }
+  },
+  "en-US": {
+    appTitle: "TFT Auto Queue",
+    statusRunning: "Running",
+    statusStopped: "Stopped",
+    settings: "Settings",
+    start: "Start Auto Queue (F1)",
+    stop: "Stop Auto Queue (F1)",
+    applying: "Applying...",
+    save: "Save Settings",
+    saving: "Saving...",
+    cancel: "Cancel",
+    dialogTitle: "Settings",
+    statsQueue: "Queue",
+    statsPhase: "Phase",
+    statsSession: "Current Session",
+    statsTotal: "Total Runs",
+    manualQueue: "Manual Queue",
+    queueTockers: "Tocker's Trials",
+    fieldsLanguage: "Language",
+    fieldsQueueId: "Queue ID",
+    fieldsPollInterval: "Poll Interval",
+    fieldsPostGameDelayMin: "Post-game Delay Min",
+    fieldsPostGameDelayMax: "Post-game Delay Max",
+    fieldsQueueRetryBlock: "Queue Retry Block",
+    fieldsHomeResetCooldown: "Home Reset Cooldown",
+    fieldsReconnectCooldown: "Reconnect Cooldown",
+    fieldsCycleReconnectTimeout: "Cycle Reconnect Timeout",
+    fieldsAutoCancelOnDisable: "Cancel matchmaking search when disabling auto queue",
+    queueIdError: "Queue ID must be a positive integer or left blank.",
+    positiveIntegerError: "Enter a positive integer.",
+    maxDelayError: "Max delay must be greater than or equal to min delay.",
+    languageChinese: "简体中文",
+    languageEnglish: "English",
+    phaseUnknown: "Unknown",
+    unitMilliseconds: "ms",
+    unitSeconds: "sec",
+    phases: {
+      None: "None",
+      Lobby: "Lobby",
+      Matchmaking: "Matchmaking",
+      ReadyCheck: "Ready Check",
+      ChampSelect: "Champ Select",
+      InProgress: "In Progress",
+      WaitingForStats: "Waiting For Stats",
+      PreEndOfGame: "Pre End Of Game",
+      EndOfGame: "End Of Game",
+      Reconnect: "Reconnect",
+      TerminatedInError: "Terminated In Error",
+      Unknown: "Unknown"
+    }
+  }
+} as const;
+
+function getTranslations(language: AppLanguage) {
+  return translations[language];
+}
+
+function settingsToForm(settings: AppSettings): SettingsFormState {
+  return {
+    language: settings.language,
+    queueId: settings.queueId === null ? "" : String(settings.queueId),
+    autoCancelOnDisable: settings.autoCancelOnDisable,
+    postGameDelayMinMs: String(settings.postGameDelayMinMs),
+    postGameDelayMaxMs: String(settings.postGameDelayMaxMs),
+    queueRetryBlockSeconds: String(Math.round(settings.queueRetryBlockMs / 1000)),
+    homeResetCooldownSeconds: String(Math.round(settings.homeResetCooldownMs / 1000)),
+    reconnectCooldownSeconds: String(Math.round(settings.reconnectCooldownMs / 1000)),
+    cycleReconnectTimeoutSeconds: String(Math.round(settings.cycleReconnectTimeoutMs / 1000)),
+    pollIntervalMs: String(settings.pollIntervalMs)
+  };
+}
+
+function parsePositiveInteger(raw: string): number | null {
+  if (!/^\d+$/.test(raw.trim())) {
+    return null;
+  }
+
+  const parsed = Number(raw.trim());
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function validateSettingsForm(
+  form: SettingsFormState,
+  language: AppLanguage
+): {
+  errors: SettingsFormErrors;
+  payload: Partial<AppSettings> | null;
+} {
+  const t = getTranslations(language);
+  const errors: SettingsFormErrors = {};
+
+  const queueId = form.queueId.trim() === "" ? null : parsePositiveInteger(form.queueId);
+  if (form.queueId.trim() !== "" && queueId === null) {
+    errors.queueId = t.queueIdError;
+  }
+
+  const postGameDelayMinMs = parsePositiveInteger(form.postGameDelayMinMs);
+  if (postGameDelayMinMs === null) {
+    errors.postGameDelayMinMs = t.positiveIntegerError;
+  }
+
+  const postGameDelayMaxMs = parsePositiveInteger(form.postGameDelayMaxMs);
+  if (postGameDelayMaxMs === null) {
+    errors.postGameDelayMaxMs = t.positiveIntegerError;
+  }
+
+  if (
+    postGameDelayMinMs !== null &&
+    postGameDelayMaxMs !== null &&
+    postGameDelayMinMs > postGameDelayMaxMs
+  ) {
+    errors.postGameDelayMaxMs = t.maxDelayError;
+  }
+
+  const queueRetryBlockSeconds = parsePositiveInteger(form.queueRetryBlockSeconds);
+  if (queueRetryBlockSeconds === null) {
+    errors.queueRetryBlockSeconds = t.positiveIntegerError;
+  }
+
+  const homeResetCooldownSeconds = parsePositiveInteger(form.homeResetCooldownSeconds);
+  if (homeResetCooldownSeconds === null) {
+    errors.homeResetCooldownSeconds = t.positiveIntegerError;
+  }
+
+  const reconnectCooldownSeconds = parsePositiveInteger(form.reconnectCooldownSeconds);
+  if (reconnectCooldownSeconds === null) {
+    errors.reconnectCooldownSeconds = t.positiveIntegerError;
+  }
+
+  const cycleReconnectTimeoutSeconds = parsePositiveInteger(form.cycleReconnectTimeoutSeconds);
+  if (cycleReconnectTimeoutSeconds === null) {
+    errors.cycleReconnectTimeoutSeconds = t.positiveIntegerError;
+  }
+
+  const pollIntervalMs = parsePositiveInteger(form.pollIntervalMs);
+  if (pollIntervalMs === null) {
+    errors.pollIntervalMs = t.positiveIntegerError;
+  }
+
+  if (Object.keys(errors).length > 0) {
+    return { errors, payload: null };
+  }
+
+  return {
+    errors: {},
+    payload: {
+      language: form.language,
+      queueId,
+      autoCancelOnDisable: form.autoCancelOnDisable,
+      postGameDelayMinMs: postGameDelayMinMs ?? undefined,
+      postGameDelayMaxMs: postGameDelayMaxMs ?? undefined,
+      queueRetryBlockMs: (queueRetryBlockSeconds ?? 0) * 1000,
+      homeResetCooldownMs: (homeResetCooldownSeconds ?? 0) * 1000,
+      reconnectCooldownMs: (reconnectCooldownSeconds ?? 0) * 1000,
+      cycleReconnectTimeoutMs: (cycleReconnectTimeoutSeconds ?? 0) * 1000,
+      pollIntervalMs: pollIntervalMs ?? undefined
+    }
+  };
+}
+
+function displayPhase(language: AppLanguage, phase: string): string {
+  const t = getTranslations(language);
+  if (!phase || phase === "-") {
+    return t.phaseUnknown;
+  }
+
+  return t.phases[phase as keyof typeof t.phases] ?? phase;
+}
+
+function displayQueueName(language: AppLanguage, queueId: number, queueName: string): string {
+  const t = getTranslations(language);
+
+  if (queueId === 1220) {
+    return t.queueTockers;
+  }
+
+  if (queueName === "Manual Queue") {
+    return t.manualQueue;
+  }
+
+  return queueName || "-";
+}
+
 function StatCard({
   title,
   value,
@@ -93,7 +376,7 @@ function StatCard({
 }: {
   title: string;
   value: string;
-  icon: React.ReactNode;
+  icon: ReactNode;
 }) {
   return (
     <Card>
@@ -121,17 +404,31 @@ function StatCard({
   );
 }
 
+function renderHelperText(message?: string) {
+  return message ?? " ";
+}
+
 export function App() {
   const [state, setState] = useState<ServiceSnapshot>(emptyState);
+  const [settings, setSettings] = useState<AppSettings>(emptySettings);
+  const [settingsForm, setSettingsForm] = useState<SettingsFormState>(settingsToForm(emptySettings));
+  const [settingsErrors, setSettingsErrors] = useState<SettingsFormErrors>({});
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsError, setSettingsError] = useState("");
+  const [settingsSaving, setSettingsSaving] = useState(false);
   const [toggling, setToggling] = useState(false);
 
   useEffect(() => {
     let mounted = true;
+
     window.tftApi.getInitialData().then((data) => {
       if (!mounted) {
         return;
       }
+
       setState(data.state);
+      setSettings(data.settings);
+      setSettingsForm(settingsToForm(data.settings));
     });
 
     const offState = window.tftApi.onState((next) => setState(next));
@@ -141,39 +438,104 @@ export function App() {
     };
   }, []);
 
-  const statusLabel = state.enabled ? "Running" : "Stopped";
+  const uiLanguage = settingsOpen ? settingsForm.language : settings.language;
+  const t = useMemo(() => getTranslations(uiLanguage), [uiLanguage]);
+
+  useEffect(() => {
+    document.title = t.appTitle;
+  }, [t.appTitle]);
+
+  const statusLabel = state.enabled ? t.statusRunning : t.statusStopped;
   const stats = [
     {
-      title: "Queue",
-      value: state.queueName,
+      title: t.statsQueue,
+      value: displayQueueName(uiLanguage, state.queueId, state.queueName),
       icon: <SportsEsportsRoundedIcon fontSize="small" />
     },
     {
-      title: "Phase",
-      value: state.phase || "-",
+      title: t.statsPhase,
+      value: displayPhase(uiLanguage, state.phase),
       icon: <TimelineRoundedIcon fontSize="small" />
     },
     {
-      title: "Current Session",
+      title: t.statsSession,
       value: String(state.sessionCycleCount),
       icon: <RepeatRoundedIcon fontSize="small" />
     },
     {
-      title: "Total Runs",
+      title: t.statsTotal,
       value: String(state.totalCycleCount),
       icon: <FunctionsRoundedIcon fontSize="small" />
     }
   ];
 
+  const openSettings = () => {
+    setSettingsForm(settingsToForm(settings));
+    setSettingsErrors({});
+    setSettingsError("");
+    setSettingsOpen(true);
+  };
+
+  const closeSettings = () => {
+    if (settingsSaving) {
+      return;
+    }
+
+    setSettingsOpen(false);
+  };
+
+  const updateFormField = <K extends keyof SettingsFormState>(key: K, value: SettingsFormState[K]) => {
+    setSettingsForm((current) => ({
+      ...current,
+      [key]: value
+    }));
+
+    setSettingsErrors((current) => {
+      if (!current[key]) {
+        return current;
+      }
+
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  };
+
   const onToggle = async () => {
     if (toggling) {
       return;
     }
+
     setToggling(true);
     try {
       await window.tftApi.toggle();
     } finally {
       setToggling(false);
+    }
+  };
+
+  const onSaveSettings = async () => {
+    if (settingsSaving) {
+      return;
+    }
+
+    const validation = validateSettingsForm(settingsForm, settingsForm.language);
+    setSettingsErrors(validation.errors);
+    if (!validation.payload) {
+      return;
+    }
+
+    setSettingsSaving(true);
+    setSettingsError("");
+    try {
+      const nextSettings = await window.tftApi.saveSettings(validation.payload);
+      setSettings(nextSettings);
+      setSettingsForm(settingsToForm(nextSettings));
+      setSettingsOpen(false);
+    } catch (error) {
+      setSettingsError(String(error));
+    } finally {
+      setSettingsSaving(false);
     }
   };
 
@@ -199,7 +561,9 @@ export function App() {
                 justifyContent="space-between"
                 alignItems={{ xs: "flex-start", md: "center" }}
               >
-                <Typography variant="h5">TFT Auto Queue</Typography>
+                <Box>
+                  <Typography variant="h5">{t.appTitle}</Typography>
+                </Box>
 
                 <Stack
                   direction={{ xs: "column", sm: "row" }}
@@ -213,6 +577,15 @@ export function App() {
                     variant={state.enabled ? "filled" : "outlined"}
                     sx={{ fontWeight: 600, alignSelf: { xs: "flex-start", sm: "center" } }}
                   />
+                  <Button
+                    variant="outlined"
+                    color="inherit"
+                    onClick={openSettings}
+                    startIcon={<SettingsRoundedIcon />}
+                    sx={{ minWidth: { xs: "100%", sm: 150 } }}
+                  >
+                    {t.settings}
+                  </Button>
                   <Button
                     variant="contained"
                     color={state.enabled ? "error" : "primary"}
@@ -229,7 +602,7 @@ export function App() {
                     }
                     sx={{ minWidth: { xs: "100%", sm: 220 } }}
                   >
-                    {toggling ? "Applying..." : state.enabled ? "Stop Auto Queue (F1)" : "Start Auto Queue (F1)"}
+                    {toggling ? t.applying : state.enabled ? t.stop : t.start}
                   </Button>
                 </Stack>
               </Stack>
@@ -254,6 +627,150 @@ export function App() {
             ))}
           </Box>
         </Container>
+
+        <Dialog open={settingsOpen} onClose={closeSettings} maxWidth="md" fullWidth>
+          <DialogTitle sx={{ pb: 1 }}>{t.dialogTitle}</DialogTitle>
+          <DialogContent sx={{ pt: 1 }}>
+            <Stack spacing={2.5}>
+              {settingsError ? <Alert severity="error">{settingsError}</Alert> : null}
+
+              <Box
+                sx={{
+                  display: "grid",
+                  gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" },
+                  gap: 2
+                }}
+              >
+                <TextField
+                  select
+                  label={t.fieldsLanguage}
+                  value={settingsForm.language}
+                  onChange={(event) => updateFormField("language", event.target.value as AppLanguage)}
+                  fullWidth
+                >
+                  <MenuItem value="zh-CN">{t.languageChinese}</MenuItem>
+                  <MenuItem value="en-US">{t.languageEnglish}</MenuItem>
+                </TextField>
+
+                <TextField
+                  label={t.fieldsQueueId}
+                  value={settingsForm.queueId}
+                  onChange={(event) => updateFormField("queueId", event.target.value)}
+                  error={Boolean(settingsErrors.queueId)}
+                  helperText={renderHelperText(settingsErrors.queueId)}
+                  fullWidth
+                />
+
+                <TextField
+                  label={t.fieldsPollInterval}
+                  value={settingsForm.pollIntervalMs}
+                  onChange={(event) => updateFormField("pollIntervalMs", event.target.value)}
+                  error={Boolean(settingsErrors.pollIntervalMs)}
+                  helperText={renderHelperText(settingsErrors.pollIntervalMs)}
+                  fullWidth
+                  InputProps={{
+                    endAdornment: <InputAdornment position="end">{t.unitMilliseconds}</InputAdornment>
+                  }}
+                />
+
+                <TextField
+                  label={t.fieldsPostGameDelayMin}
+                  value={settingsForm.postGameDelayMinMs}
+                  onChange={(event) => updateFormField("postGameDelayMinMs", event.target.value)}
+                  error={Boolean(settingsErrors.postGameDelayMinMs)}
+                  helperText={renderHelperText(settingsErrors.postGameDelayMinMs)}
+                  fullWidth
+                  InputProps={{
+                    endAdornment: <InputAdornment position="end">{t.unitMilliseconds}</InputAdornment>
+                  }}
+                />
+
+                <TextField
+                  label={t.fieldsPostGameDelayMax}
+                  value={settingsForm.postGameDelayMaxMs}
+                  onChange={(event) => updateFormField("postGameDelayMaxMs", event.target.value)}
+                  error={Boolean(settingsErrors.postGameDelayMaxMs)}
+                  helperText={renderHelperText(settingsErrors.postGameDelayMaxMs)}
+                  fullWidth
+                  InputProps={{
+                    endAdornment: <InputAdornment position="end">{t.unitMilliseconds}</InputAdornment>
+                  }}
+                />
+
+                <TextField
+                  label={t.fieldsQueueRetryBlock}
+                  value={settingsForm.queueRetryBlockSeconds}
+                  onChange={(event) => updateFormField("queueRetryBlockSeconds", event.target.value)}
+                  error={Boolean(settingsErrors.queueRetryBlockSeconds)}
+                  helperText={renderHelperText(settingsErrors.queueRetryBlockSeconds)}
+                  fullWidth
+                  InputProps={{
+                    endAdornment: <InputAdornment position="end">{t.unitSeconds}</InputAdornment>
+                  }}
+                />
+
+                <TextField
+                  label={t.fieldsHomeResetCooldown}
+                  value={settingsForm.homeResetCooldownSeconds}
+                  onChange={(event) => updateFormField("homeResetCooldownSeconds", event.target.value)}
+                  error={Boolean(settingsErrors.homeResetCooldownSeconds)}
+                  helperText={renderHelperText(settingsErrors.homeResetCooldownSeconds)}
+                  fullWidth
+                  InputProps={{
+                    endAdornment: <InputAdornment position="end">{t.unitSeconds}</InputAdornment>
+                  }}
+                />
+
+                <TextField
+                  label={t.fieldsReconnectCooldown}
+                  value={settingsForm.reconnectCooldownSeconds}
+                  onChange={(event) => updateFormField("reconnectCooldownSeconds", event.target.value)}
+                  error={Boolean(settingsErrors.reconnectCooldownSeconds)}
+                  helperText={renderHelperText(settingsErrors.reconnectCooldownSeconds)}
+                  fullWidth
+                  InputProps={{
+                    endAdornment: <InputAdornment position="end">{t.unitSeconds}</InputAdornment>
+                  }}
+                />
+
+                <TextField
+                  label={t.fieldsCycleReconnectTimeout}
+                  value={settingsForm.cycleReconnectTimeoutSeconds}
+                  onChange={(event) => updateFormField("cycleReconnectTimeoutSeconds", event.target.value)}
+                  error={Boolean(settingsErrors.cycleReconnectTimeoutSeconds)}
+                  helperText={renderHelperText(settingsErrors.cycleReconnectTimeoutSeconds)}
+                  fullWidth
+                  InputProps={{
+                    endAdornment: <InputAdornment position="end">{t.unitSeconds}</InputAdornment>
+                  }}
+                />
+              </Box>
+
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={settingsForm.autoCancelOnDisable}
+                    onChange={(event) => updateFormField("autoCancelOnDisable", event.target.checked)}
+                  />
+                }
+                label={t.fieldsAutoCancelOnDisable}
+              />
+            </Stack>
+          </DialogContent>
+          <DialogActions sx={{ px: 3, pb: 3 }}>
+            <Button onClick={closeSettings} color="inherit" disabled={settingsSaving}>
+              {t.cancel}
+            </Button>
+            <Button
+              variant="contained"
+              onClick={onSaveSettings}
+              disabled={settingsSaving}
+              startIcon={settingsSaving ? <AutorenewRoundedIcon className="spin" /> : <SaveRoundedIcon />}
+            >
+              {settingsSaving ? t.saving : t.save}
+            </Button>
+          </DialogActions>
+        </Dialog>
       </PageWrap>
     </ThemeProvider>
   );
