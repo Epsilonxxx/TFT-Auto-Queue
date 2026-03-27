@@ -23,6 +23,7 @@ describe("JsonConfigStore", () => {
     expect(fs.existsSync(filePath)).toBe(true);
     expect(store.get().settings.queueId).toBe(1220);
     expect(store.get().settings.language).toBe("zh-CN");
+    expect(store.get().settings.scheduledRestartHours).toBe(0);
     expect(store.get().stats.totalCycleCount).toBe(0);
   });
 
@@ -65,5 +66,24 @@ describe("JsonConfigStore", () => {
 
     const reloadedStore = new JsonConfigStore(filePath, createDefaultAppConfig({ APP_LANGUAGE: "en-US" }));
     expect(reloadedStore.get().settings.language).toBe("zh-CN");
+  });
+
+  it("persists scheduled restart hours across store instances", () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "tft-config-"));
+    tempDirs.push(tempDir);
+
+    const filePath = resolveConfigFilePath(tempDir);
+    const store = new JsonConfigStore(filePath, createDefaultAppConfig());
+
+    store.update((current) => ({
+      ...current,
+      settings: {
+        ...current.settings,
+        scheduledRestartHours: 4
+      }
+    }));
+
+    const reloadedStore = new JsonConfigStore(filePath, createDefaultAppConfig());
+    expect(reloadedStore.get().settings.scheduledRestartHours).toBe(4);
   });
 });

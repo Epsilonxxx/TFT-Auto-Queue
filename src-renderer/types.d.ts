@@ -4,6 +4,7 @@ export type AppSettings = {
   language: AppLanguage;
   queueId: number | null;
   autoCancelOnDisable: boolean;
+  scheduledRestartHours: number;
   postGameDelayMinMs: number;
   postGameDelayMaxMs: number;
   queueRetryBlockMs: number;

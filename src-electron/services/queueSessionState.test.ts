@@ -55,4 +55,23 @@ describe("QueueSessionState", () => {
     session.observePhase("Lobby", 12000);
     expect(session.shouldReturnToLobbyFromReconnect(22000, 10000)).toBe(false);
   });
+
+  it("tracks game-entry timeout and scheduled client restart windows", () => {
+    const session = new QueueSessionState({
+      totalCycleCount: 0,
+      sessionCycleCount: 0
+    });
+
+    session.resetForStart();
+    session.observePhase("ReadyCheck", 1000);
+    expect(session.shouldReturnToLobbyForGameEntryTimeout(1000 + 179000, 180000)).toBe(false);
+    expect(session.shouldReturnToLobbyForGameEntryTimeout(1000 + 180000, 180000)).toBe(true);
+
+    session.observePhase("InProgress", 200000);
+    expect(session.shouldReturnToLobbyForGameEntryTimeout(400000, 180000)).toBe(false);
+
+    session.markLeagueClientRestart(0);
+    expect(session.shouldRestartLeagueClient(59 * 60 * 1000, 60 * 60 * 1000)).toBe(false);
+    expect(session.shouldRestartLeagueClient(60 * 60 * 1000, 60 * 60 * 1000)).toBe(true);
+  });
 });

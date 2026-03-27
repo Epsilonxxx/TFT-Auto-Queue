@@ -25,6 +25,8 @@ export class QueueSessionState {
   private activeCycleStartedAt: number | null = null;
   private currentPhaseStartedAt: number | null = null;
   private reconnectPhaseStartedAt: number | null = null;
+  private noGameStartedAt: number | null = null;
+  private lastClientRestartAt = Number.NEGATIVE_INFINITY;
   private flowState: QueueFlowStateName = "Idle";
 
   constructor(initialStats: { totalCycleCount: number; sessionCycleCount: number }) {
@@ -83,6 +85,8 @@ export class QueueSessionState {
     this.activeCycleStartedAt = null;
     this.currentPhaseStartedAt = null;
     this.reconnectPhaseStartedAt = null;
+    this.noGameStartedAt = null;
+    this.lastClientRestartAt = Number.NEGATIVE_INFINITY;
     this.flowState = "Idle";
   }
 
@@ -98,6 +102,8 @@ export class QueueSessionState {
     this.activeCycleStartedAt = null;
     this.currentPhaseStartedAt = null;
     this.reconnectPhaseStartedAt = null;
+    this.noGameStartedAt = null;
+    this.lastClientRestartAt = Number.NEGATIVE_INFINITY;
     this.flowState = "Idle";
   }
 
@@ -114,6 +120,7 @@ export class QueueSessionState {
     this.tracking = transition.nextState;
     this.updateCycleWindow(phase, now);
     this.updateReconnectWindow(phase, now);
+    this.updateNoGameWindow(phase, now);
     return transition;
   }
 
@@ -190,6 +197,30 @@ export class QueueSessionState {
     return now - this.reconnectPhaseStartedAt >= thresholdMs;
   }
 
+  shouldReturnToLobbyForGameEntryTimeout(now: number, thresholdMs: number): boolean {
+    if (this.noGameStartedAt === null) {
+      return false;
+    }
+
+    return now - this.noGameStartedAt >= thresholdMs;
+  }
+
+  resetNoGameTimer(now: number): void {
+    this.noGameStartedAt = now;
+  }
+
+  markLeagueClientRestart(now: number): void {
+    this.lastClientRestartAt = now;
+  }
+
+  shouldRestartLeagueClient(now: number, intervalMs: number): boolean {
+    if (intervalMs <= 0) {
+      return false;
+    }
+
+    return now - this.lastClientRestartAt >= intervalMs;
+  }
+
   private updateCycleWindow(phase: GameflowPhase, now: number): void {
     if (isTrackedCyclePhase(phase)) {
       if (this.activeCycleStartedAt === null) {
@@ -210,5 +241,16 @@ export class QueueSessionState {
     }
 
     this.reconnectPhaseStartedAt = null;
+  }
+
+  private updateNoGameWindow(phase: GameflowPhase, now: number): void {
+    if (phase !== "InProgress") {
+      if (this.noGameStartedAt === null) {
+        this.noGameStartedAt = this.currentPhaseStartedAt ?? now;
+      }
+      return;
+    }
+
+    this.noGameStartedAt = null;
   }
 }

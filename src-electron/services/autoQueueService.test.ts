@@ -133,6 +133,7 @@ function createHarness(clients: FakeLcuClient[]) {
   const sleepCalls: number[] = [];
   const logs: string[] = [];
   let dismissCrashDialogCalls = 0;
+  let restartLeagueClientCalls = 0;
   const configStore = new MemoryConfigStore(createDefaultAppConfig());
 
   const service = new AutoQueueService({
@@ -153,6 +154,10 @@ function createHarness(clients: FakeLcuClient[]) {
     dismissCrashDialog: async () => {
       dismissCrashDialogCalls += 1;
       return "dismissed";
+    },
+    restartLeagueClient: async () => {
+      restartLeagueClientCalls += 1;
+      return true;
     }
   });
 
@@ -162,6 +167,7 @@ function createHarness(clients: FakeLcuClient[]) {
     logs,
     sleepCalls,
     getDismissCrashDialogCalls: () => dismissCrashDialogCalls,
+    getRestartLeagueClientCalls: () => restartLeagueClientCalls,
     advanceTime: (ms: number) => {
       nowValue += ms;
     }
@@ -177,12 +183,12 @@ describe("AutoQueueService", () => {
   it("blocks matchmaking retries until the backoff window expires", async () => {
     const client = new FakeLcuClient();
     client.phase = "Lobby";
+    const harness = createHarness([client]);
+    harness.service.updateSettings({ queueRetryBlockMs: 1000 });
     client.queuePostError(
       "/lol-lobby/v2/lobby/matchmaking/search",
       createAxiosFailure(429, "Unable to enter matchmaking queue. Please try again later")
     );
-
-    const harness = createHarness([client]);
 
     await harness.service.start();
     expect(client.postCalls.filter((call) => call.path === "/lol-lobby/v2/lobby/matchmaking/search")).toHaveLength(1);
@@ -190,7 +196,7 @@ describe("AutoQueueService", () => {
     await harness.service.tickOnce();
     expect(client.postCalls.filter((call) => call.path === "/lol-lobby/v2/lobby/matchmaking/search")).toHaveLength(1);
 
-    harness.advanceTime(3 * 60 * 1000 + 1);
+    harness.advanceTime(1001);
     await harness.service.tickOnce();
     expect(client.postCalls.filter((call) => call.path === "/lol-lobby/v2/lobby/matchmaking/search")).toHaveLength(2);
   });
@@ -211,6 +217,27 @@ describe("AutoQueueService", () => {
     expect(client.postCalls.filter((call) => call.path === "/lol-lobby/v2/lobby")).toHaveLength(1);
     expect(client.postCalls.filter((call) => call.path === "/lol-lobby/v2/lobby/matchmaking/search")).toHaveLength(2);
     expect(harness.sleepCalls).toContain(1200);
+  });
+
+  it("returns to lobby and blocks requeue for 2 minutes when game entry times out", async () => {
+    const client = new FakeLcuClient();
+    client.phase = "ReadyCheck";
+    const harness = createHarness([client]);
+
+    await harness.service.start();
+    harness.advanceTime(3 * 60 * 1000);
+    await harness.service.tickOnce();
+
+    expect(client.postCalls.some((call) => call.path === "/lol-gameflow/v1/session/request-lobby")).toBe(true);
+    expect(harness.logs).toContain("No game entered for over 3 minutes. Returning to lobby and waiting 2 minutes before retrying.");
+
+    const searchCalls = client.postCalls.filter((call) => call.path === "/lol-lobby/v2/lobby/matchmaking/search");
+    expect(searchCalls).toHaveLength(0);
+
+    harness.advanceTime(2 * 60 * 1000 + 1);
+    client.phase = "Lobby";
+    await harness.service.tickOnce();
+    expect(client.postCalls.filter((call) => call.path === "/lol-lobby/v2/lobby/matchmaking/search")).toHaveLength(1);
   });
 
   it("waits 5 minutes before retrying when join queue fails unexpectedly", async () => {
@@ -344,5 +371,24 @@ describe("AutoQueueService", () => {
       totalCycleCount: 1,
       sessionCycleCount: 1
     });
+  });
+
+  it("restarts the league client on the configured hourly schedule and recovers queueing", async () => {
+    const firstClient = new FakeLcuClient();
+    firstClient.phase = "InProgress";
+    const recoveredClient = new FakeLcuClient();
+    recoveredClient.phase = "Lobby";
+    const harness = createHarness([firstClient, recoveredClient]);
+    harness.service.updateSettings({ scheduledRestartHours: 1 });
+
+    await harness.service.start();
+    harness.advanceTime(60 * 60 * 1000);
+    firstClient.phase = "Lobby";
+    await harness.service.tickOnce();
+
+    expect(harness.getRestartLeagueClientCalls()).toBe(1);
+    expect(harness.logs).toContain("Scheduled League client restart triggered.");
+    expect(harness.logs).toContain("League client restarted and recovered.");
+    expect(harness.sleepCalls).toContain(30000);
   });
 });

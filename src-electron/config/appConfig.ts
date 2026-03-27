@@ -7,6 +7,7 @@ export type AppSettings = {
   language: AppLanguage;
   queueId: number | null;
   autoCancelOnDisable: boolean;
+  scheduledRestartHours: number;
   postGameDelayMinMs: number;
   postGameDelayMaxMs: number;
   queueRetryBlockMs: number;
@@ -48,6 +49,11 @@ function readOptionalPositive(raw: string | undefined, fallback: number): number
   return parsed !== null && parsed > 0 ? parsed : fallback;
 }
 
+function readOptionalNonNegativeInteger(raw: string | undefined, fallback: number): number {
+  const parsed = readOptionalNumber(raw);
+  return parsed !== null && Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
 function cloneConfig(config: PersistedAppConfig): PersistedAppConfig {
   return {
     version: config.version,
@@ -67,6 +73,7 @@ export function createDefaultAppConfig(env: NodeJS.ProcessEnv = process.env): Pe
       language: env.APP_LANGUAGE === "en-US" ? "en-US" : "zh-CN",
       queueId,
       autoCancelOnDisable: (env.AUTO_CANCEL_ON_DISABLE ?? "true").toLowerCase() === "true",
+      scheduledRestartHours: readOptionalNonNegativeInteger(env.SCHEDULED_RESTART_HOURS, 0),
       postGameDelayMinMs: Math.min(postGameDelayMinMs, postGameDelayMaxMs),
       postGameDelayMaxMs: Math.max(postGameDelayMinMs, postGameDelayMaxMs),
       queueRetryBlockMs: readOptionalPositive(env.QUEUE_RETRY_BLOCK_MS, 3 * 60 * 1000),
@@ -110,6 +117,12 @@ export function normalizeAppConfig(
         typeof settings.autoCancelOnDisable === "boolean"
           ? settings.autoCancelOnDisable
           : defaults.settings.autoCancelOnDisable,
+      scheduledRestartHours:
+        typeof settings.scheduledRestartHours === "number" &&
+        Number.isInteger(settings.scheduledRestartHours) &&
+        settings.scheduledRestartHours >= 0
+          ? settings.scheduledRestartHours
+          : defaults.settings.scheduledRestartHours,
       postGameDelayMinMs: Math.min(minDelay, maxDelay),
       postGameDelayMaxMs: Math.max(minDelay, maxDelay),
       queueRetryBlockMs:

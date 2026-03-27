@@ -10,6 +10,7 @@ import type { GameflowPhase, LcuClient } from "../lcu/client";
 import { LcuClient as RiotLcuClient } from "../lcu/client";
 import type { LcuCredentials } from "../lcu/discovery";
 import { discoverLcuCredentials } from "../lcu/discovery";
+import { LeagueClientController } from "../utils/leagueClientController";
 import { log } from "../utils/logger";
 import { SystemErrorRecovery } from "../utils/systemErrorRecovery";
 import { PhaseMonitor, type PhaseObservation } from "./phaseMonitor";
@@ -45,6 +46,11 @@ type SnapshotListener = (snapshot: ServiceSnapshot) => void;
 
 const ATTEMPT_JOIN_QUEUE_RETRY_MS = 5 * 60 * 1000;
 const RECONNECT_LOBBY_FALLBACK_MS = 15 * 1000;
+const GAME_ENTRY_TIMEOUT_MS = 3 * 60 * 1000;
+const GAME_ENTRY_RETRY_DELAY_MS = 2 * 60 * 1000;
+const LEAGUE_CLIENT_RESTART_BOOT_MS = 30 * 1000;
+const LEAGUE_CLIENT_RESTART_RETRY_MS = 10 * 1000;
+const LEAGUE_CLIENT_RESTART_MAX_ATTEMPTS = 12;
 
 export type AutoQueueServiceDependencies = {
   configStore?: AppConfigStore;
@@ -57,6 +63,7 @@ export type AutoQueueServiceDependencies = {
   setIntervalFn?: (callback: () => void, delay: number) => IntervalHandle;
   clearIntervalFn?: (handle: IntervalHandle) => void;
   dismissCrashDialog?: () => Promise<"dismissed" | "closed" | "not_found" | "not_match" | "error">;
+  restartLeagueClient?: () => Promise<boolean>;
 };
 
 function sleep(ms: number): Promise<void> {
@@ -164,6 +171,7 @@ export class AutoQueueService {
   private handlingObservation = false;
   private pendingObservation: PhaseObservation | null = null;
   private reconnecting = false;
+  private restartingClient = false;
   private consecutiveTickFailures = 0;
   private phaseMonitor: PhaseMonitor | null = null;
   private readonly listeners = new Set<SnapshotListener>();
@@ -184,6 +192,7 @@ export class AutoQueueService {
   private readonly setIntervalFn: (callback: () => void, delay: number) => IntervalHandle;
   private readonly clearIntervalFn: (handle: IntervalHandle) => void;
   private readonly dismissCrashDialog: () => Promise<"dismissed" | "closed" | "not_found" | "not_match" | "error">;
+  private readonly restartLeagueClient: () => Promise<boolean>;
 
   constructor(dependencies: AutoQueueServiceDependencies = {}) {
     this.configStore = dependencies.configStore ?? new MemoryConfigStore(this.defaults);
@@ -202,6 +211,7 @@ export class AutoQueueService {
     this.clearIntervalFn = dependencies.clearIntervalFn ?? clearInterval;
     this.dismissCrashDialog =
       dependencies.dismissCrashDialog ?? (() => new SystemErrorRecovery().dismissLeagueCrashDialog());
+    this.restartLeagueClient = dependencies.restartLeagueClient ?? (() => new LeagueClientController().restartLeagueClient());
     this.syncActiveQueuePreview();
   }
 
@@ -270,6 +280,7 @@ export class AutoQueueService {
 
     this.restoreConfig();
     this.session.resetForStart();
+    this.session.markLeagueClientRestart(this.now());
     this.enabled = true;
     this.persistStats();
 
@@ -303,6 +314,7 @@ export class AutoQueueService {
     this.handlingObservation = false;
     this.pendingObservation = null;
     this.reconnecting = false;
+    this.restartingClient = false;
     this.consecutiveTickFailures = 0;
     this.session.resetForStop();
     this.syncActiveQueuePreview();
@@ -417,6 +429,18 @@ export class AutoQueueService {
       this.emitSnapshot();
     }
 
+    if (phase !== "InProgress" && this.session.shouldReturnToLobbyForGameEntryTimeout(this.now(), GAME_ENTRY_TIMEOUT_MS)) {
+      await this.returnToLobbyWithDelay(
+        "No game entered for over 3 minutes. Returning to lobby and waiting 2 minutes before retrying.",
+        GAME_ENTRY_RETRY_DELAY_MS
+      );
+      return;
+    }
+
+    if (await this.maybeRestartLeagueClient(phase)) {
+      return;
+    }
+
     await this.stateMachine.handle(phase, this.createFlowContext());
   }
 
@@ -436,6 +460,7 @@ export class AutoQueueService {
       ensureSearch: () => this.ensureSearch(),
       acceptReadyCheck: () => this.acceptReadyCheck(),
       handlePostGame: () => this.handlePostGamePhase(),
+      handleGameEntryPhase: (phase) => this.handleGameEntryPhase(phase),
       handleReconnectPhase: () => this.handleReconnectPhase(),
       tryReconnectRecovery: (reason, options) => this.tryReconnectRecovery(reason, options),
       shouldReconnectForTimeout: () =>
@@ -569,6 +594,12 @@ export class AutoQueueService {
     }
   }
 
+  private async handleGameEntryPhase(phase: GameflowPhase): Promise<void> {
+    if (phase === "ReadyCheck") {
+      await this.acceptReadyCheck();
+    }
+  }
+
   private async handleReconnectPhase(): Promise<void> {
     if (!this.lcu) {
       return;
@@ -669,6 +700,24 @@ export class AutoQueueService {
     }
   }
 
+  private async maybeRestartLeagueClient(phase: GameflowPhase): Promise<boolean> {
+    if (!this.enabled || this.restartingClient || this.settings.scheduledRestartHours <= 0) {
+      return false;
+    }
+
+    if (!this.isSafePhaseForScheduledRestart(phase)) {
+      return false;
+    }
+
+    const intervalMs = this.settings.scheduledRestartHours * 60 * 60 * 1000;
+    if (!this.session.shouldRestartLeagueClient(this.now(), intervalMs)) {
+      return false;
+    }
+
+    await this.restartLeagueClientAndRecover("Scheduled League client restart triggered.");
+    return true;
+  }
+
   private async resolveQueue(): Promise<{ id: number; name: string }> {
     if (this.settings.queueId !== null && Number.isFinite(this.settings.queueId)) {
       return { id: this.settings.queueId, name: "Manual Queue" };
@@ -698,7 +747,7 @@ export class AutoQueueService {
   }
 
   private async tryRecoverLcuConnection(): Promise<void> {
-    if (!this.enabled || this.reconnecting) {
+    if (!this.enabled || this.reconnecting || this.restartingClient) {
       return;
     }
 
@@ -763,6 +812,10 @@ export class AutoQueueService {
   }
 
   private async returnToLobbyAndRetry(reason: string): Promise<void> {
+    await this.returnToLobbyWithDelay(reason, 0);
+  }
+
+  private async returnToLobbyWithDelay(reason: string, retryDelayMs: number): Promise<void> {
     if (!this.lcu) {
       return;
     }
@@ -773,7 +826,11 @@ export class AutoQueueService {
     }
 
     this.session.markHomeReset(now);
+    this.session.resetNoGameTimer(now);
     this.logger(reason);
+    if (retryDelayMs > 0) {
+      this.session.blockSearch(now, retryDelayMs);
+    }
 
     await this.tryPost("/lol-gameflow/v1/ack-failed-to-launch");
     const requestedLobby = await this.tryPost("/lol-gameflow/v1/session/request-lobby");
@@ -787,5 +844,69 @@ export class AutoQueueService {
     }
 
     await this.ensureLobbyAndSearch();
+  }
+
+  private isSafePhaseForScheduledRestart(phase: GameflowPhase): boolean {
+    return phase !== "InProgress" && phase !== "ReadyCheck" && phase !== "ChampSelect";
+  }
+
+  private async restartLeagueClientAndRecover(reason: string): Promise<void> {
+    if (!this.enabled || this.restartingClient) {
+      return;
+    }
+
+    this.restartingClient = true;
+    this.session.markLeagueClientRestart(this.now());
+    this.session.resetNoGameTimer(this.now());
+
+    try {
+      this.logger(reason);
+      this.phaseMonitor?.stop();
+      this.phaseMonitor = null;
+      this.lcu?.close();
+      this.lcu = null;
+
+      const restarted = await this.restartLeagueClient();
+      if (!restarted) {
+        this.logger("League client restart failed.");
+        return;
+      }
+
+      this.logger("League client restart command sent.");
+      await this.sleep(LEAGUE_CLIENT_RESTART_BOOT_MS);
+
+      const recovered = await this.waitForLeagueClientRecovery();
+      if (!recovered) {
+        this.logger("League client did not recover in time after restart.");
+        return;
+      }
+
+      this.logger("League client restarted and recovered.");
+      await this.ensureLobbyAndSearch();
+    } finally {
+      this.restartingClient = false;
+    }
+  }
+
+  private async waitForLeagueClientRecovery(): Promise<boolean> {
+    for (let attempt = 0; attempt < LEAGUE_CLIENT_RESTART_MAX_ATTEMPTS; attempt += 1) {
+      if (!this.enabled) {
+        return false;
+      }
+
+      try {
+        await this.initializeLcuAndQueue();
+        this.bindPhaseMonitor();
+        this.consecutiveTickFailures = 0;
+        return true;
+      } catch {
+        if (attempt === LEAGUE_CLIENT_RESTART_MAX_ATTEMPTS - 1) {
+          break;
+        }
+        await this.sleep(LEAGUE_CLIENT_RESTART_RETRY_MS);
+      }
+    }
+
+    return false;
   }
 }

@@ -9,6 +9,7 @@ export type QueueFlowContext = {
   ensureSearch: () => Promise<void>;
   acceptReadyCheck: () => Promise<void>;
   handlePostGame: () => Promise<void>;
+  handleGameEntryPhase: (phase: GameflowPhase) => Promise<void>;
   handleReconnectPhase: () => Promise<void>;
   tryReconnectRecovery: (
     reason: string,
@@ -59,7 +60,10 @@ class LobbyQueueState implements QueueFlowState {
         await context.ensureSearch();
         break;
       case "ReadyCheck":
-        await context.acceptReadyCheck();
+        await context.handleGameEntryPhase(phase);
+        break;
+      case "ChampSelect":
+        await context.handleGameEntryPhase(phase);
         break;
       default:
         break;

@@ -110,6 +110,7 @@ const emptySettings: AppSettings = {
   language: "zh-CN",
   queueId: null,
   autoCancelOnDisable: true,
+  scheduledRestartHours: 0,
   postGameDelayMinMs: 1000,
   postGameDelayMaxMs: 2000,
   queueRetryBlockMs: 180000,
@@ -123,6 +124,7 @@ type SettingsFormState = {
   language: AppLanguage;
   queueId: string;
   autoCancelOnDisable: boolean;
+  scheduledRestartHours: string;
   postGameDelayMinMs: string;
   postGameDelayMaxMs: string;
   queueRetryBlockSeconds: string;
@@ -248,6 +250,7 @@ function settingsToForm(settings: AppSettings): SettingsFormState {
     language: settings.language,
     queueId: settings.queueId === null ? "" : String(settings.queueId),
     autoCancelOnDisable: settings.autoCancelOnDisable,
+    scheduledRestartHours: String(settings.scheduledRestartHours),
     postGameDelayMinMs: String(settings.postGameDelayMinMs),
     postGameDelayMaxMs: String(settings.postGameDelayMaxMs),
     queueRetryBlockSeconds: String(Math.round(settings.queueRetryBlockMs / 1000)),
@@ -267,6 +270,15 @@ function parsePositiveInteger(raw: string): number | null {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
+function parseNonNegativeInteger(raw: string): number | null {
+  if (!/^\d+$/.test(raw.trim())) {
+    return null;
+  }
+
+  const parsed = Number(raw.trim());
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
 function validateSettingsForm(
   form: SettingsFormState,
   language: AppLanguage
@@ -280,6 +292,11 @@ function validateSettingsForm(
   const queueId = form.queueId.trim() === "" ? null : parsePositiveInteger(form.queueId);
   if (form.queueId.trim() !== "" && queueId === null) {
     errors.queueId = t.queueIdError;
+  }
+
+  const scheduledRestartHours = parseNonNegativeInteger(form.scheduledRestartHours);
+  if (scheduledRestartHours === null) {
+    errors.scheduledRestartHours = t.positiveIntegerError;
   }
 
   const postGameDelayMinMs = parsePositiveInteger(form.postGameDelayMinMs);
@@ -335,6 +352,7 @@ function validateSettingsForm(
       language: form.language,
       queueId,
       autoCancelOnDisable: form.autoCancelOnDisable,
+      scheduledRestartHours: scheduledRestartHours ?? undefined,
       postGameDelayMinMs: postGameDelayMinMs ?? undefined,
       postGameDelayMaxMs: postGameDelayMaxMs ?? undefined,
       queueRetryBlockMs: (queueRetryBlockSeconds ?? 0) * 1000,
@@ -440,6 +458,25 @@ export function App() {
 
   const uiLanguage = settingsOpen ? settingsForm.language : settings.language;
   const t = useMemo(() => getTranslations(uiLanguage), [uiLanguage]);
+  const scheduledRestartLabel =
+    uiLanguage === "zh-CN" ? "\u5b9a\u65f6\u91cd\u542f\u6e38\u620f" : "Scheduled Game Restart";
+  const sectionTitles = {
+    general: uiLanguage === "zh-CN" ? "\u57fa\u7840\u8bbe\u7f6e" : "General",
+    timing: uiLanguage === "zh-CN" ? "\u65f6\u5e8f\u8bbe\u7f6e" : "Timing",
+    recovery: uiLanguage === "zh-CN" ? "\u5f02\u5e38\u6062\u590d" : "Recovery",
+    maintenance: uiLanguage === "zh-CN" ? "\u7ef4\u62a4" : "Maintenance"
+  };
+  const scheduledRestartOptions = Array.from({ length: 25 }, (_, index) => index);
+
+  const formatScheduledRestartOption = (hours: number) => {
+    if (hours === 0) {
+      return uiLanguage === "zh-CN" ? "\u5173\u95ed" : "Disabled";
+    }
+
+    return uiLanguage === "zh-CN"
+      ? `\u6bcf ${hours} \u5c0f\u65f6`
+      : `Every ${hours} hour${hours === 1 ? "" : "s"}`;
+  };
 
   useEffect(() => {
     document.title = t.appTitle;
@@ -634,127 +671,191 @@ export function App() {
             <Stack spacing={2.5}>
               {settingsError ? <Alert severity="error">{settingsError}</Alert> : null}
 
-              <Box
-                sx={{
-                  display: "grid",
-                  gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" },
-                  gap: 2
-                }}
-              >
-                <TextField
-                  select
-                  label={t.fieldsLanguage}
-                  value={settingsForm.language}
-                  onChange={(event) => updateFormField("language", event.target.value as AppLanguage)}
-                  fullWidth
-                >
-                  <MenuItem value="zh-CN">{t.languageChinese}</MenuItem>
-                  <MenuItem value="en-US">{t.languageEnglish}</MenuItem>
-                </TextField>
+              <Stack spacing={2}>
+                <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: 3, p: 2.5 }}>
+                  <Typography variant="subtitle2" sx={{ mb: 2 }}>
+                    {sectionTitles.general}
+                  </Typography>
+                  <Box
+                    sx={{
+                      display: "grid",
+                      gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" },
+                      gap: 2
+                    }}
+                  >
+                    <TextField
+                      select
+                      label={t.fieldsLanguage}
+                      value={settingsForm.language}
+                      onChange={(event) => updateFormField("language", event.target.value as AppLanguage)}
+                      fullWidth
+                    >
+                      <MenuItem value="zh-CN">{t.languageChinese}</MenuItem>
+                      <MenuItem value="en-US">{t.languageEnglish}</MenuItem>
+                    </TextField>
 
-                <TextField
-                  label={t.fieldsQueueId}
-                  value={settingsForm.queueId}
-                  onChange={(event) => updateFormField("queueId", event.target.value)}
-                  error={Boolean(settingsErrors.queueId)}
-                  helperText={renderHelperText(settingsErrors.queueId)}
-                  fullWidth
-                />
+                    <TextField
+                      label={t.fieldsQueueId}
+                      value={settingsForm.queueId}
+                      onChange={(event) => updateFormField("queueId", event.target.value)}
+                      error={Boolean(settingsErrors.queueId)}
+                      helperText={renderHelperText(settingsErrors.queueId)}
+                      fullWidth
+                    />
+                  </Box>
+                </Box>
 
-                <TextField
-                  label={t.fieldsPollInterval}
-                  value={settingsForm.pollIntervalMs}
-                  onChange={(event) => updateFormField("pollIntervalMs", event.target.value)}
-                  error={Boolean(settingsErrors.pollIntervalMs)}
-                  helperText={renderHelperText(settingsErrors.pollIntervalMs)}
-                  fullWidth
-                  InputProps={{
-                    endAdornment: <InputAdornment position="end">{t.unitMilliseconds}</InputAdornment>
-                  }}
-                />
+                <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: 3, p: 2.5 }}>
+                  <Typography variant="subtitle2" sx={{ mb: 2 }}>
+                    {sectionTitles.timing}
+                  </Typography>
+                  <Box
+                    sx={{
+                      display: "grid",
+                      gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" },
+                      gap: 2
+                    }}
+                  >
+                    <TextField
+                      label={t.fieldsPollInterval}
+                      value={settingsForm.pollIntervalMs}
+                      onChange={(event) => updateFormField("pollIntervalMs", event.target.value)}
+                      error={Boolean(settingsErrors.pollIntervalMs)}
+                      helperText={renderHelperText(settingsErrors.pollIntervalMs)}
+                      fullWidth
+                      InputProps={{
+                        endAdornment: <InputAdornment position="end">{t.unitMilliseconds}</InputAdornment>
+                      }}
+                    />
 
-                <TextField
-                  label={t.fieldsPostGameDelayMin}
-                  value={settingsForm.postGameDelayMinMs}
-                  onChange={(event) => updateFormField("postGameDelayMinMs", event.target.value)}
-                  error={Boolean(settingsErrors.postGameDelayMinMs)}
-                  helperText={renderHelperText(settingsErrors.postGameDelayMinMs)}
-                  fullWidth
-                  InputProps={{
-                    endAdornment: <InputAdornment position="end">{t.unitMilliseconds}</InputAdornment>
-                  }}
-                />
+                    <TextField
+                      label={t.fieldsPostGameDelayMin}
+                      value={settingsForm.postGameDelayMinMs}
+                      onChange={(event) => updateFormField("postGameDelayMinMs", event.target.value)}
+                      error={Boolean(settingsErrors.postGameDelayMinMs)}
+                      helperText={renderHelperText(settingsErrors.postGameDelayMinMs)}
+                      fullWidth
+                      InputProps={{
+                        endAdornment: <InputAdornment position="end">{t.unitMilliseconds}</InputAdornment>
+                      }}
+                    />
 
-                <TextField
-                  label={t.fieldsPostGameDelayMax}
-                  value={settingsForm.postGameDelayMaxMs}
-                  onChange={(event) => updateFormField("postGameDelayMaxMs", event.target.value)}
-                  error={Boolean(settingsErrors.postGameDelayMaxMs)}
-                  helperText={renderHelperText(settingsErrors.postGameDelayMaxMs)}
-                  fullWidth
-                  InputProps={{
-                    endAdornment: <InputAdornment position="end">{t.unitMilliseconds}</InputAdornment>
-                  }}
-                />
+                    <TextField
+                      label={t.fieldsPostGameDelayMax}
+                      value={settingsForm.postGameDelayMaxMs}
+                      onChange={(event) => updateFormField("postGameDelayMaxMs", event.target.value)}
+                      error={Boolean(settingsErrors.postGameDelayMaxMs)}
+                      helperText={renderHelperText(settingsErrors.postGameDelayMaxMs)}
+                      fullWidth
+                      InputProps={{
+                        endAdornment: <InputAdornment position="end">{t.unitMilliseconds}</InputAdornment>
+                      }}
+                    />
+                  </Box>
+                </Box>
 
-                <TextField
-                  label={t.fieldsQueueRetryBlock}
-                  value={settingsForm.queueRetryBlockSeconds}
-                  onChange={(event) => updateFormField("queueRetryBlockSeconds", event.target.value)}
-                  error={Boolean(settingsErrors.queueRetryBlockSeconds)}
-                  helperText={renderHelperText(settingsErrors.queueRetryBlockSeconds)}
-                  fullWidth
-                  InputProps={{
-                    endAdornment: <InputAdornment position="end">{t.unitSeconds}</InputAdornment>
-                  }}
-                />
+                <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: 3, p: 2.5 }}>
+                  <Typography variant="subtitle2" sx={{ mb: 2 }}>
+                    {sectionTitles.recovery}
+                  </Typography>
+                  <Box
+                    sx={{
+                      display: "grid",
+                      gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" },
+                      gap: 2
+                    }}
+                  >
+                    <TextField
+                      label={t.fieldsQueueRetryBlock}
+                      value={settingsForm.queueRetryBlockSeconds}
+                      onChange={(event) => updateFormField("queueRetryBlockSeconds", event.target.value)}
+                      error={Boolean(settingsErrors.queueRetryBlockSeconds)}
+                      helperText={renderHelperText(settingsErrors.queueRetryBlockSeconds)}
+                      fullWidth
+                      InputProps={{
+                        endAdornment: <InputAdornment position="end">{t.unitSeconds}</InputAdornment>
+                      }}
+                    />
 
-                <TextField
-                  label={t.fieldsHomeResetCooldown}
-                  value={settingsForm.homeResetCooldownSeconds}
-                  onChange={(event) => updateFormField("homeResetCooldownSeconds", event.target.value)}
-                  error={Boolean(settingsErrors.homeResetCooldownSeconds)}
-                  helperText={renderHelperText(settingsErrors.homeResetCooldownSeconds)}
-                  fullWidth
-                  InputProps={{
-                    endAdornment: <InputAdornment position="end">{t.unitSeconds}</InputAdornment>
-                  }}
-                />
+                    <TextField
+                      label={t.fieldsHomeResetCooldown}
+                      value={settingsForm.homeResetCooldownSeconds}
+                      onChange={(event) => updateFormField("homeResetCooldownSeconds", event.target.value)}
+                      error={Boolean(settingsErrors.homeResetCooldownSeconds)}
+                      helperText={renderHelperText(settingsErrors.homeResetCooldownSeconds)}
+                      fullWidth
+                      InputProps={{
+                        endAdornment: <InputAdornment position="end">{t.unitSeconds}</InputAdornment>
+                      }}
+                    />
 
-                <TextField
-                  label={t.fieldsReconnectCooldown}
-                  value={settingsForm.reconnectCooldownSeconds}
-                  onChange={(event) => updateFormField("reconnectCooldownSeconds", event.target.value)}
-                  error={Boolean(settingsErrors.reconnectCooldownSeconds)}
-                  helperText={renderHelperText(settingsErrors.reconnectCooldownSeconds)}
-                  fullWidth
-                  InputProps={{
-                    endAdornment: <InputAdornment position="end">{t.unitSeconds}</InputAdornment>
-                  }}
-                />
+                    <TextField
+                      label={t.fieldsReconnectCooldown}
+                      value={settingsForm.reconnectCooldownSeconds}
+                      onChange={(event) => updateFormField("reconnectCooldownSeconds", event.target.value)}
+                      error={Boolean(settingsErrors.reconnectCooldownSeconds)}
+                      helperText={renderHelperText(settingsErrors.reconnectCooldownSeconds)}
+                      fullWidth
+                      InputProps={{
+                        endAdornment: <InputAdornment position="end">{t.unitSeconds}</InputAdornment>
+                      }}
+                    />
 
-                <TextField
-                  label={t.fieldsCycleReconnectTimeout}
-                  value={settingsForm.cycleReconnectTimeoutSeconds}
-                  onChange={(event) => updateFormField("cycleReconnectTimeoutSeconds", event.target.value)}
-                  error={Boolean(settingsErrors.cycleReconnectTimeoutSeconds)}
-                  helperText={renderHelperText(settingsErrors.cycleReconnectTimeoutSeconds)}
-                  fullWidth
-                  InputProps={{
-                    endAdornment: <InputAdornment position="end">{t.unitSeconds}</InputAdornment>
-                  }}
-                />
-              </Box>
+                    <TextField
+                      label={t.fieldsCycleReconnectTimeout}
+                      value={settingsForm.cycleReconnectTimeoutSeconds}
+                      onChange={(event) => updateFormField("cycleReconnectTimeoutSeconds", event.target.value)}
+                      error={Boolean(settingsErrors.cycleReconnectTimeoutSeconds)}
+                      helperText={renderHelperText(settingsErrors.cycleReconnectTimeoutSeconds)}
+                      fullWidth
+                      InputProps={{
+                        endAdornment: <InputAdornment position="end">{t.unitSeconds}</InputAdornment>
+                      }}
+                    />
+                  </Box>
+                </Box>
 
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={settingsForm.autoCancelOnDisable}
-                    onChange={(event) => updateFormField("autoCancelOnDisable", event.target.checked)}
-                  />
-                }
-                label={t.fieldsAutoCancelOnDisable}
-              />
+                <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: 3, p: 2.5 }}>
+                  <Typography variant="subtitle2" sx={{ mb: 2 }}>
+                    {sectionTitles.maintenance}
+                  </Typography>
+                  <Box
+                    sx={{
+                      display: "grid",
+                      gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" },
+                      gap: 2
+                    }}
+                  >
+                    <TextField
+                      select
+                      label={scheduledRestartLabel}
+                      value={settingsForm.scheduledRestartHours}
+                      onChange={(event) => updateFormField("scheduledRestartHours", event.target.value)}
+                      error={Boolean(settingsErrors.scheduledRestartHours)}
+                      helperText={renderHelperText(settingsErrors.scheduledRestartHours)}
+                      fullWidth
+                    >
+                      {scheduledRestartOptions.map((hours) => (
+                        <MenuItem key={hours} value={String(hours)}>
+                          {formatScheduledRestartOption(hours)}
+                        </MenuItem>
+                      ))}
+                    </TextField>
+                  </Box>
+
+                  <Box sx={{ mt: 2 }}>
+                    <FormControlLabel
+                      control={
+                        <Switch
+                          checked={settingsForm.autoCancelOnDisable}
+                          onChange={(event) => updateFormField("autoCancelOnDisable", event.target.checked)}
+                        />
+                      }
+                      label={t.fieldsAutoCancelOnDisable}
+                    />
+                  </Box>
+                </Box>
+              </Stack>
             </Stack>
           </DialogContent>
           <DialogActions sx={{ px: 3, pb: 3 }}>
