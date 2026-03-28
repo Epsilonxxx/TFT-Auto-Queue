@@ -4,14 +4,39 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 
 const POWER_SHELL_DISMISS_SCRIPT = `
-$title = 'System Error'
-$titlePattern = 'critical error|process must be terminated|crash dump|troubleshooting this issue'
+$windowPatterns = @(
+  'system error',
+  'critical error',
+  'league of legends',
+  'riot client',
+  'bugsplat',
+  '系统错误',
+  '严重错误',
+  '崩溃'
+)
+$textPatterns = @(
+  'critical error has occurred',
+  'process must be terminated',
+  'create a crash dump',
+  'troubleshooting this issue',
+  'memory dump',
+  'unexpected exception',
+  'serious problem',
+  '崩溃转储',
+  '内存转储',
+  '进程必须终止',
+  '无法连接服务器',
+  '客户端已崩溃'
+)
+$preferredButtons = @('No', '否', 'Cancel', '取消', 'Close', '关闭', 'OK', '确定')
+
 Add-Type @"
 using System;
 using System.Text;
 using System.Runtime.InteropServices;
 
 public static class Win32Recovery {
+  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
   public delegate bool EnumChildProc(IntPtr hWnd, IntPtr lParam);
 
   [StructLayout(LayoutKind.Sequential)]
@@ -22,11 +47,14 @@ public static class Win32Recovery {
     public int Bottom;
   }
 
-  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-  public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+  [DllImport("user32.dll")]
+  public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
 
   [DllImport("user32.dll")]
   public static extern bool EnumChildWindows(IntPtr hWndParent, EnumChildProc lpEnumFunc, IntPtr lParam);
+
+  [DllImport("user32.dll")]
+  public static extern bool IsWindowVisible(IntPtr hWnd);
 
   [DllImport("user32.dll", CharSet = CharSet.Unicode)]
   public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
@@ -51,62 +79,127 @@ public static class Win32Recovery {
 }
 "@
 
-$window = [Win32Recovery]::FindWindow($null, $title)
-if ($window -eq [IntPtr]::Zero) {
+function Get-WindowTextValue([IntPtr]$handle, [int]$capacity = 1024) {
+  $buffer = New-Object System.Text.StringBuilder $capacity
+  [void][Win32Recovery]::GetWindowText($handle, $buffer, $buffer.Capacity)
+  return $buffer.ToString()
+}
+
+function Get-ClassNameValue([IntPtr]$handle, [int]$capacity = 256) {
+  $buffer = New-Object System.Text.StringBuilder $capacity
+  [void][Win32Recovery]::GetClassName($handle, $buffer, $buffer.Capacity)
+  return $buffer.ToString()
+}
+
+function Contains-Pattern([string]$value, [string[]]$patterns) {
+  if ([string]::IsNullOrWhiteSpace($value)) {
+    return $false
+  }
+
+  $lower = $value.ToLowerInvariant()
+  foreach ($pattern in $patterns) {
+    if ($lower.Contains($pattern.ToLowerInvariant())) {
+      return $true
+    }
+  }
+
+  return $false
+}
+
+$matchedWindow = $null
+
+[Win32Recovery]::EnumWindows({
+  param($hWnd, $lParam)
+
+  if (-not [Win32Recovery]::IsWindowVisible($hWnd)) {
+    return $true
+  }
+
+  $title = Get-WindowTextValue $hWnd 512
+  if ([string]::IsNullOrWhiteSpace($title)) {
+    return $true
+  }
+
+  $texts = New-Object System.Collections.Generic.List[string]
+  $buttons = New-Object System.Collections.Generic.List[object]
+  [void]$texts.Add($title)
+
+  [Win32Recovery]::EnumChildWindows($hWnd, {
+    param($child, $ignored)
+
+    $className = Get-ClassNameValue $child
+    $text = Get-WindowTextValue $child
+
+    if (-not [string]::IsNullOrWhiteSpace($text)) {
+      [void]$texts.Add($text)
+    }
+
+    if ($className -eq 'Button') {
+      $rect = New-Object Win32Recovery+RECT
+      if ([Win32Recovery]::GetWindowRect($child, [ref]$rect)) {
+        [void]$buttons.Add([pscustomobject]@{
+          Handle = $child
+          Left = $rect.Left
+          Text = ($text ?? '').Trim()
+        })
+      }
+    }
+
+    return $true
+  }, [IntPtr]::Zero) | Out-Null
+
+  $joinedText = ($texts -join ' ')
+  $likelyCrashDialog =
+    (Contains-Pattern $title $windowPatterns) -or
+    (Contains-Pattern $joinedText $textPatterns)
+
+  if (-not $likelyCrashDialog) {
+    return $true
+  }
+
+  $script:matchedWindow = [pscustomobject]@{
+    Handle = $hWnd
+    Title = $title
+    Text = $joinedText
+    Buttons = $buttons
+  }
+
+  return $false
+}, [IntPtr]::Zero) | Out-Null
+
+if ($null -eq $matchedWindow) {
   Write-Output 'not_found'
   exit 0
 }
 
-$allTexts = New-Object System.Collections.Generic.List[string]
-$buttons = New-Object System.Collections.Generic.List[object]
-
-[Win32Recovery]::EnumChildWindows($window, {
-  param($child, $lParam)
-
-  $className = New-Object System.Text.StringBuilder 256
-  [void][Win32Recovery]::GetClassName($child, $className, $className.Capacity)
-  $classText = $className.ToString()
-
-  $textBuilder = New-Object System.Text.StringBuilder 512
-  [void][Win32Recovery]::GetWindowText($child, $textBuilder, $textBuilder.Capacity)
-  $text = $textBuilder.ToString()
-
-  if (-not [string]::IsNullOrWhiteSpace($text)) {
-    [void]$allTexts.Add($text)
-  }
-
-  if ($classText -eq 'Button') {
-    $rect = New-Object Win32Recovery+RECT
-    if ([Win32Recovery]::GetWindowRect($child, [ref]$rect)) {
-      [void]$buttons.Add([pscustomobject]@{
-        Handle = $child
-        Left = $rect.Left
-        Text = $text
-      })
-    }
-  }
-
-  return $true
-}, [IntPtr]::Zero) | Out-Null
-
-$joinedText = ($allTexts -join ' ')
-if ($joinedText -notmatch $titlePattern) {
-  Write-Output 'not_match'
-  exit 0
-}
-
-[Win32Recovery]::ShowWindow($window, 5) | Out-Null
-[Win32Recovery]::SetForegroundWindow($window) | Out-Null
+[Win32Recovery]::ShowWindow($matchedWindow.Handle, 5) | Out-Null
+[Win32Recovery]::SetForegroundWindow($matchedWindow.Handle) | Out-Null
 Start-Sleep -Milliseconds 120
 
-if ($buttons.Count -gt 0) {
-  $targetButton = $buttons | Sort-Object Left | Select-Object -First 1
+$targetButton = $null
+foreach ($buttonText in $preferredButtons) {
+  $candidate = $matchedWindow.Buttons |
+    Where-Object { $_.Text -and $_.Text.Equals($buttonText, [System.StringComparison]::OrdinalIgnoreCase) } |
+    Sort-Object Left |
+    Select-Object -First 1
+
+  if ($null -ne $candidate) {
+    $targetButton = $candidate
+    break
+  }
+}
+
+if ($null -eq $targetButton -and $matchedWindow.Buttons.Count -gt 0) {
+  $targetButton = $matchedWindow.Buttons | Sort-Object Left | Select-Object -First 1
+}
+
+if ($null -ne $targetButton) {
   [Win32Recovery]::SendMessage($targetButton.Handle, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
   Write-Output 'dismissed'
   exit 0
 }
 
-[Win32Recovery]::PostMessage($window, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+[Win32Recovery]::PostMessage($matchedWindow.Handle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
 Write-Output 'closed'
 `.trim();
 

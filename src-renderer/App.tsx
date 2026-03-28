@@ -110,7 +110,6 @@ const emptySettings: AppSettings = {
   language: "zh-CN",
   queueId: null,
   autoCancelOnDisable: true,
-  scheduledRestartHours: 0,
   postGameDelayMinMs: 1000,
   postGameDelayMaxMs: 2000,
   queueRetryBlockMs: 180000,
@@ -124,14 +123,13 @@ type SettingsFormState = {
   language: AppLanguage;
   queueId: string;
   autoCancelOnDisable: boolean;
-  scheduledRestartHours: string;
-  postGameDelayMinMs: string;
-  postGameDelayMaxMs: string;
+  pollIntervalSeconds: string;
+  postGameDelayMinSeconds: string;
+  postGameDelayMaxSeconds: string;
   queueRetryBlockSeconds: string;
   homeResetCooldownSeconds: string;
   reconnectCooldownSeconds: string;
   cycleReconnectTimeoutSeconds: string;
-  pollIntervalMs: string;
 };
 
 type SettingsFormErrors = Partial<Record<keyof SettingsFormState, string>>;
@@ -160,18 +158,20 @@ const translations = {
     fieldsPollInterval: "轮询间隔",
     fieldsPostGameDelayMin: "结算后最小延迟",
     fieldsPostGameDelayMax: "结算后最大延迟",
-    fieldsQueueRetryBlock: "限制后等待",
-    fieldsHomeResetCooldown: "回首页冷却",
+    fieldsQueueRetryBlock: "匹配失败等待",
+    fieldsHomeResetCooldown: "回主页冷却",
     fieldsReconnectCooldown: "重连冷却",
     fieldsCycleReconnectTimeout: "单局超时重连",
     fieldsAutoCancelOnDisable: "关闭自动匹配时取消当前搜索",
+    generalSection: "基础设置",
+    timingSection: "时序设置",
+    recoverySection: "恢复设置",
     queueIdError: "队列 ID 必须是正整数，或留空。",
-    positiveIntegerError: "请输入正整数。",
+    positiveNumberError: "请输入大于 0 的数字。",
     maxDelayError: "最大延迟必须大于或等于最小延迟。",
     languageChinese: "简体中文",
     languageEnglish: "English",
     phaseUnknown: "未知",
-    unitMilliseconds: "毫秒",
     unitSeconds: "秒",
     phases: {
       None: "无",
@@ -211,18 +211,20 @@ const translations = {
     fieldsPollInterval: "Poll Interval",
     fieldsPostGameDelayMin: "Post-game Delay Min",
     fieldsPostGameDelayMax: "Post-game Delay Max",
-    fieldsQueueRetryBlock: "Queue Retry Block",
+    fieldsQueueRetryBlock: "Queue Retry Wait",
     fieldsHomeResetCooldown: "Home Reset Cooldown",
     fieldsReconnectCooldown: "Reconnect Cooldown",
     fieldsCycleReconnectTimeout: "Cycle Reconnect Timeout",
-    fieldsAutoCancelOnDisable: "Cancel matchmaking search when disabling auto queue",
+    fieldsAutoCancelOnDisable: "Cancel current search when disabling auto queue",
+    generalSection: "General",
+    timingSection: "Timing",
+    recoverySection: "Recovery",
     queueIdError: "Queue ID must be a positive integer or left blank.",
-    positiveIntegerError: "Enter a positive integer.",
+    positiveNumberError: "Enter a number greater than 0.",
     maxDelayError: "Max delay must be greater than or equal to min delay.",
     languageChinese: "简体中文",
     languageEnglish: "English",
     phaseUnknown: "Unknown",
-    unitMilliseconds: "ms",
     unitSeconds: "sec",
     phases: {
       None: "None",
@@ -245,19 +247,23 @@ function getTranslations(language: AppLanguage) {
   return translations[language];
 }
 
+function formatSeconds(ms: number): string {
+  const seconds = ms / 1000;
+  return Number.isInteger(seconds) ? String(seconds) : String(Number(seconds.toFixed(1)));
+}
+
 function settingsToForm(settings: AppSettings): SettingsFormState {
   return {
     language: settings.language,
     queueId: settings.queueId === null ? "" : String(settings.queueId),
     autoCancelOnDisable: settings.autoCancelOnDisable,
-    scheduledRestartHours: String(settings.scheduledRestartHours),
-    postGameDelayMinMs: String(settings.postGameDelayMinMs),
-    postGameDelayMaxMs: String(settings.postGameDelayMaxMs),
-    queueRetryBlockSeconds: String(Math.round(settings.queueRetryBlockMs / 1000)),
-    homeResetCooldownSeconds: String(Math.round(settings.homeResetCooldownMs / 1000)),
-    reconnectCooldownSeconds: String(Math.round(settings.reconnectCooldownMs / 1000)),
-    cycleReconnectTimeoutSeconds: String(Math.round(settings.cycleReconnectTimeoutMs / 1000)),
-    pollIntervalMs: String(settings.pollIntervalMs)
+    pollIntervalSeconds: formatSeconds(settings.pollIntervalMs),
+    postGameDelayMinSeconds: formatSeconds(settings.postGameDelayMinMs),
+    postGameDelayMaxSeconds: formatSeconds(settings.postGameDelayMaxMs),
+    queueRetryBlockSeconds: formatSeconds(settings.queueRetryBlockMs),
+    homeResetCooldownSeconds: formatSeconds(settings.homeResetCooldownMs),
+    reconnectCooldownSeconds: formatSeconds(settings.reconnectCooldownMs),
+    cycleReconnectTimeoutSeconds: formatSeconds(settings.cycleReconnectTimeoutMs)
   };
 }
 
@@ -270,13 +276,17 @@ function parsePositiveInteger(raw: string): number | null {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
-function parseNonNegativeInteger(raw: string): number | null {
-  if (!/^\d+$/.test(raw.trim())) {
+function parsePositiveMillisecondsFromSeconds(raw: string): number | null {
+  if (!/^\d+(\.\d+)?$/.test(raw.trim())) {
     return null;
   }
 
   const parsed = Number(raw.trim());
-  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+
+  return Math.round(parsed * 1000);
 }
 
 function validateSettingsForm(
@@ -294,19 +304,19 @@ function validateSettingsForm(
     errors.queueId = t.queueIdError;
   }
 
-  const scheduledRestartHours = parseNonNegativeInteger(form.scheduledRestartHours);
-  if (scheduledRestartHours === null) {
-    errors.scheduledRestartHours = t.positiveIntegerError;
+  const pollIntervalMs = parsePositiveMillisecondsFromSeconds(form.pollIntervalSeconds);
+  if (pollIntervalMs === null) {
+    errors.pollIntervalSeconds = t.positiveNumberError;
   }
 
-  const postGameDelayMinMs = parsePositiveInteger(form.postGameDelayMinMs);
+  const postGameDelayMinMs = parsePositiveMillisecondsFromSeconds(form.postGameDelayMinSeconds);
   if (postGameDelayMinMs === null) {
-    errors.postGameDelayMinMs = t.positiveIntegerError;
+    errors.postGameDelayMinSeconds = t.positiveNumberError;
   }
 
-  const postGameDelayMaxMs = parsePositiveInteger(form.postGameDelayMaxMs);
+  const postGameDelayMaxMs = parsePositiveMillisecondsFromSeconds(form.postGameDelayMaxSeconds);
   if (postGameDelayMaxMs === null) {
-    errors.postGameDelayMaxMs = t.positiveIntegerError;
+    errors.postGameDelayMaxSeconds = t.positiveNumberError;
   }
 
   if (
@@ -314,32 +324,27 @@ function validateSettingsForm(
     postGameDelayMaxMs !== null &&
     postGameDelayMinMs > postGameDelayMaxMs
   ) {
-    errors.postGameDelayMaxMs = t.maxDelayError;
+    errors.postGameDelayMaxSeconds = t.maxDelayError;
   }
 
-  const queueRetryBlockSeconds = parsePositiveInteger(form.queueRetryBlockSeconds);
-  if (queueRetryBlockSeconds === null) {
-    errors.queueRetryBlockSeconds = t.positiveIntegerError;
+  const queueRetryBlockMs = parsePositiveMillisecondsFromSeconds(form.queueRetryBlockSeconds);
+  if (queueRetryBlockMs === null) {
+    errors.queueRetryBlockSeconds = t.positiveNumberError;
   }
 
-  const homeResetCooldownSeconds = parsePositiveInteger(form.homeResetCooldownSeconds);
-  if (homeResetCooldownSeconds === null) {
-    errors.homeResetCooldownSeconds = t.positiveIntegerError;
+  const homeResetCooldownMs = parsePositiveMillisecondsFromSeconds(form.homeResetCooldownSeconds);
+  if (homeResetCooldownMs === null) {
+    errors.homeResetCooldownSeconds = t.positiveNumberError;
   }
 
-  const reconnectCooldownSeconds = parsePositiveInteger(form.reconnectCooldownSeconds);
-  if (reconnectCooldownSeconds === null) {
-    errors.reconnectCooldownSeconds = t.positiveIntegerError;
+  const reconnectCooldownMs = parsePositiveMillisecondsFromSeconds(form.reconnectCooldownSeconds);
+  if (reconnectCooldownMs === null) {
+    errors.reconnectCooldownSeconds = t.positiveNumberError;
   }
 
-  const cycleReconnectTimeoutSeconds = parsePositiveInteger(form.cycleReconnectTimeoutSeconds);
-  if (cycleReconnectTimeoutSeconds === null) {
-    errors.cycleReconnectTimeoutSeconds = t.positiveIntegerError;
-  }
-
-  const pollIntervalMs = parsePositiveInteger(form.pollIntervalMs);
-  if (pollIntervalMs === null) {
-    errors.pollIntervalMs = t.positiveIntegerError;
+  const cycleReconnectTimeoutMs = parsePositiveMillisecondsFromSeconds(form.cycleReconnectTimeoutSeconds);
+  if (cycleReconnectTimeoutMs === null) {
+    errors.cycleReconnectTimeoutSeconds = t.positiveNumberError;
   }
 
   if (Object.keys(errors).length > 0) {
@@ -352,14 +357,13 @@ function validateSettingsForm(
       language: form.language,
       queueId,
       autoCancelOnDisable: form.autoCancelOnDisable,
-      scheduledRestartHours: scheduledRestartHours ?? undefined,
+      pollIntervalMs: pollIntervalMs ?? undefined,
       postGameDelayMinMs: postGameDelayMinMs ?? undefined,
       postGameDelayMaxMs: postGameDelayMaxMs ?? undefined,
-      queueRetryBlockMs: (queueRetryBlockSeconds ?? 0) * 1000,
-      homeResetCooldownMs: (homeResetCooldownSeconds ?? 0) * 1000,
-      reconnectCooldownMs: (reconnectCooldownSeconds ?? 0) * 1000,
-      cycleReconnectTimeoutMs: (cycleReconnectTimeoutSeconds ?? 0) * 1000,
-      pollIntervalMs: pollIntervalMs ?? undefined
+      queueRetryBlockMs: queueRetryBlockMs ?? undefined,
+      homeResetCooldownMs: homeResetCooldownMs ?? undefined,
+      reconnectCooldownMs: reconnectCooldownMs ?? undefined,
+      cycleReconnectTimeoutMs: cycleReconnectTimeoutMs ?? undefined
     }
   };
 }
@@ -426,6 +430,23 @@ function renderHelperText(message?: string) {
   return message ?? " ";
 }
 
+function SettingsSection({
+  title,
+  children
+}: {
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: 3, p: 2.5 }}>
+      <Typography variant="subtitle2" sx={{ mb: 2 }}>
+        {title}
+      </Typography>
+      {children}
+    </Box>
+  );
+}
+
 export function App() {
   const [state, setState] = useState<ServiceSnapshot>(emptyState);
   const [settings, setSettings] = useState<AppSettings>(emptySettings);
@@ -458,25 +479,6 @@ export function App() {
 
   const uiLanguage = settingsOpen ? settingsForm.language : settings.language;
   const t = useMemo(() => getTranslations(uiLanguage), [uiLanguage]);
-  const scheduledRestartLabel =
-    uiLanguage === "zh-CN" ? "\u5b9a\u65f6\u91cd\u542f\u6e38\u620f" : "Scheduled Game Restart";
-  const sectionTitles = {
-    general: uiLanguage === "zh-CN" ? "\u57fa\u7840\u8bbe\u7f6e" : "General",
-    timing: uiLanguage === "zh-CN" ? "\u65f6\u5e8f\u8bbe\u7f6e" : "Timing",
-    recovery: uiLanguage === "zh-CN" ? "\u5f02\u5e38\u6062\u590d" : "Recovery",
-    maintenance: uiLanguage === "zh-CN" ? "\u7ef4\u62a4" : "Maintenance"
-  };
-  const scheduledRestartOptions = Array.from({ length: 25 }, (_, index) => index);
-
-  const formatScheduledRestartOption = (hours: number) => {
-    if (hours === 0) {
-      return uiLanguage === "zh-CN" ? "\u5173\u95ed" : "Disabled";
-    }
-
-    return uiLanguage === "zh-CN"
-      ? `\u6bcf ${hours} \u5c0f\u65f6`
-      : `Every ${hours} hour${hours === 1 ? "" : "s"}`;
-  };
 
   useEffect(() => {
     document.title = t.appTitle;
@@ -598,9 +600,7 @@ export function App() {
                 justifyContent="space-between"
                 alignItems={{ xs: "flex-start", md: "center" }}
               >
-                <Box>
-                  <Typography variant="h5">{t.appTitle}</Typography>
-                </Box>
+                <Typography variant="h5">{t.appTitle}</Typography>
 
                 <Stack
                   direction={{ xs: "column", sm: "row" }}
@@ -672,10 +672,7 @@ export function App() {
               {settingsError ? <Alert severity="error">{settingsError}</Alert> : null}
 
               <Stack spacing={2}>
-                <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: 3, p: 2.5 }}>
-                  <Typography variant="subtitle2" sx={{ mb: 2 }}>
-                    {sectionTitles.general}
-                  </Typography>
+                <SettingsSection title={t.generalSection}>
                   <Box
                     sx={{
                       display: "grid",
@@ -703,12 +700,21 @@ export function App() {
                       fullWidth
                     />
                   </Box>
-                </Box>
 
-                <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: 3, p: 2.5 }}>
-                  <Typography variant="subtitle2" sx={{ mb: 2 }}>
-                    {sectionTitles.timing}
-                  </Typography>
+                  <Box sx={{ mt: 2 }}>
+                    <FormControlLabel
+                      control={
+                        <Switch
+                          checked={settingsForm.autoCancelOnDisable}
+                          onChange={(event) => updateFormField("autoCancelOnDisable", event.target.checked)}
+                        />
+                      }
+                      label={t.fieldsAutoCancelOnDisable}
+                    />
+                  </Box>
+                </SettingsSection>
+
+                <SettingsSection title={t.timingSection}>
                   <Box
                     sx={{
                       display: "grid",
@@ -718,46 +724,43 @@ export function App() {
                   >
                     <TextField
                       label={t.fieldsPollInterval}
-                      value={settingsForm.pollIntervalMs}
-                      onChange={(event) => updateFormField("pollIntervalMs", event.target.value)}
-                      error={Boolean(settingsErrors.pollIntervalMs)}
-                      helperText={renderHelperText(settingsErrors.pollIntervalMs)}
+                      value={settingsForm.pollIntervalSeconds}
+                      onChange={(event) => updateFormField("pollIntervalSeconds", event.target.value)}
+                      error={Boolean(settingsErrors.pollIntervalSeconds)}
+                      helperText={renderHelperText(settingsErrors.pollIntervalSeconds)}
                       fullWidth
                       InputProps={{
-                        endAdornment: <InputAdornment position="end">{t.unitMilliseconds}</InputAdornment>
+                        endAdornment: <InputAdornment position="end">{t.unitSeconds}</InputAdornment>
                       }}
                     />
 
                     <TextField
                       label={t.fieldsPostGameDelayMin}
-                      value={settingsForm.postGameDelayMinMs}
-                      onChange={(event) => updateFormField("postGameDelayMinMs", event.target.value)}
-                      error={Boolean(settingsErrors.postGameDelayMinMs)}
-                      helperText={renderHelperText(settingsErrors.postGameDelayMinMs)}
+                      value={settingsForm.postGameDelayMinSeconds}
+                      onChange={(event) => updateFormField("postGameDelayMinSeconds", event.target.value)}
+                      error={Boolean(settingsErrors.postGameDelayMinSeconds)}
+                      helperText={renderHelperText(settingsErrors.postGameDelayMinSeconds)}
                       fullWidth
                       InputProps={{
-                        endAdornment: <InputAdornment position="end">{t.unitMilliseconds}</InputAdornment>
+                        endAdornment: <InputAdornment position="end">{t.unitSeconds}</InputAdornment>
                       }}
                     />
 
                     <TextField
                       label={t.fieldsPostGameDelayMax}
-                      value={settingsForm.postGameDelayMaxMs}
-                      onChange={(event) => updateFormField("postGameDelayMaxMs", event.target.value)}
-                      error={Boolean(settingsErrors.postGameDelayMaxMs)}
-                      helperText={renderHelperText(settingsErrors.postGameDelayMaxMs)}
+                      value={settingsForm.postGameDelayMaxSeconds}
+                      onChange={(event) => updateFormField("postGameDelayMaxSeconds", event.target.value)}
+                      error={Boolean(settingsErrors.postGameDelayMaxSeconds)}
+                      helperText={renderHelperText(settingsErrors.postGameDelayMaxSeconds)}
                       fullWidth
                       InputProps={{
-                        endAdornment: <InputAdornment position="end">{t.unitMilliseconds}</InputAdornment>
+                        endAdornment: <InputAdornment position="end">{t.unitSeconds}</InputAdornment>
                       }}
                     />
                   </Box>
-                </Box>
+                </SettingsSection>
 
-                <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: 3, p: 2.5 }}>
-                  <Typography variant="subtitle2" sx={{ mb: 2 }}>
-                    {sectionTitles.recovery}
-                  </Typography>
+                <SettingsSection title={t.recoverySection}>
                   <Box
                     sx={{
                       display: "grid",
@@ -813,48 +816,7 @@ export function App() {
                       }}
                     />
                   </Box>
-                </Box>
-
-                <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: 3, p: 2.5 }}>
-                  <Typography variant="subtitle2" sx={{ mb: 2 }}>
-                    {sectionTitles.maintenance}
-                  </Typography>
-                  <Box
-                    sx={{
-                      display: "grid",
-                      gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" },
-                      gap: 2
-                    }}
-                  >
-                    <TextField
-                      select
-                      label={scheduledRestartLabel}
-                      value={settingsForm.scheduledRestartHours}
-                      onChange={(event) => updateFormField("scheduledRestartHours", event.target.value)}
-                      error={Boolean(settingsErrors.scheduledRestartHours)}
-                      helperText={renderHelperText(settingsErrors.scheduledRestartHours)}
-                      fullWidth
-                    >
-                      {scheduledRestartOptions.map((hours) => (
-                        <MenuItem key={hours} value={String(hours)}>
-                          {formatScheduledRestartOption(hours)}
-                        </MenuItem>
-                      ))}
-                    </TextField>
-                  </Box>
-
-                  <Box sx={{ mt: 2 }}>
-                    <FormControlLabel
-                      control={
-                        <Switch
-                          checked={settingsForm.autoCancelOnDisable}
-                          onChange={(event) => updateFormField("autoCancelOnDisable", event.target.checked)}
-                        />
-                      }
-                      label={t.fieldsAutoCancelOnDisable}
-                    />
-                  </Box>
-                </Box>
+                </SettingsSection>
               </Stack>
             </Stack>
           </DialogContent>

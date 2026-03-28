@@ -39,6 +39,10 @@ describe("QueueSessionState", () => {
     session.markReconnect(1000);
     expect(session.canReconnect(4000, 5000)).toBe(false);
     expect(session.canReconnect(7000, 5000)).toBe(true);
+
+    session.blockSearch(8000, 5000, { stayOnHome: true });
+    expect(session.shouldStayOnHome(9000)).toBe(true);
+    expect(session.shouldStayOnHome(13001)).toBe(false);
   });
 
   it("tracks reconnect phase duration for lobby fallback", () => {
@@ -56,7 +60,7 @@ describe("QueueSessionState", () => {
     expect(session.shouldReturnToLobbyFromReconnect(22000, 10000)).toBe(false);
   });
 
-  it("tracks game-entry timeout and scheduled client restart windows", () => {
+  it("tracks game-entry timeout only while a match is trying to start", () => {
     const session = new QueueSessionState({
       totalCycleCount: 0,
       sessionCycleCount: 0
@@ -70,8 +74,7 @@ describe("QueueSessionState", () => {
     session.observePhase("InProgress", 200000);
     expect(session.shouldReturnToLobbyForGameEntryTimeout(400000, 180000)).toBe(false);
 
-    session.markLeagueClientRestart(0);
-    expect(session.shouldRestartLeagueClient(59 * 60 * 1000, 60 * 60 * 1000)).toBe(false);
-    expect(session.shouldRestartLeagueClient(60 * 60 * 1000, 60 * 60 * 1000)).toBe(true);
+    session.observePhase("Lobby", 401000);
+    expect(session.shouldReturnToLobbyForGameEntryTimeout(401000 + 180000, 180000)).toBe(false);
   });
 });

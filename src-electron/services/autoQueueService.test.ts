@@ -133,7 +133,6 @@ function createHarness(clients: FakeLcuClient[]) {
   const sleepCalls: number[] = [];
   const logs: string[] = [];
   let dismissCrashDialogCalls = 0;
-  let restartLeagueClientCalls = 0;
   const configStore = new MemoryConfigStore(createDefaultAppConfig());
 
   const service = new AutoQueueService({
@@ -154,10 +153,6 @@ function createHarness(clients: FakeLcuClient[]) {
     dismissCrashDialog: async () => {
       dismissCrashDialogCalls += 1;
       return "dismissed";
-    },
-    restartLeagueClient: async () => {
-      restartLeagueClientCalls += 1;
-      return true;
     }
   });
 
@@ -167,7 +162,6 @@ function createHarness(clients: FakeLcuClient[]) {
     logs,
     sleepCalls,
     getDismissCrashDialogCalls: () => dismissCrashDialogCalls,
-    getRestartLeagueClientCalls: () => restartLeagueClientCalls,
     advanceTime: (ms: number) => {
       nowValue += ms;
     }
@@ -219,7 +213,7 @@ describe("AutoQueueService", () => {
     expect(harness.sleepCalls).toContain(1200);
   });
 
-  it("returns to lobby and blocks requeue for 2 minutes when game entry times out", async () => {
+  it("returns to the League home screen and waits 2 minutes when game entry times out", async () => {
     const client = new FakeLcuClient();
     client.phase = "ReadyCheck";
     const harness = createHarness([client]);
@@ -228,19 +222,30 @@ describe("AutoQueueService", () => {
     harness.advanceTime(3 * 60 * 1000);
     await harness.service.tickOnce();
 
-    expect(client.postCalls.some((call) => call.path === "/lol-gameflow/v1/session/request-lobby")).toBe(true);
-    expect(harness.logs).toContain("No game entered for over 3 minutes. Returning to lobby and waiting 2 minutes before retrying.");
+    expect(client.deleteCalls).toContain("/lol-lobby/v2/lobby");
+    expect(harness.logs).toContain(
+      "No game entered for over 3 minutes. Returning to the League home screen and retrying in 2 minutes."
+    );
+    expect(harness.logs).toContain("Returned to the League home screen.");
 
     const searchCalls = client.postCalls.filter((call) => call.path === "/lol-lobby/v2/lobby/matchmaking/search");
     expect(searchCalls).toHaveLength(0);
+    const lobbyCreateCountBeforeWait = client.postCalls.filter((call) => call.path === "/lol-lobby/v2/lobby").length;
 
-    harness.advanceTime(2 * 60 * 1000 + 1);
-    client.phase = "Lobby";
+    client.phase = "None";
+    client.hasLobby = false;
+    harness.advanceTime(2 * 60 * 1000 - 301);
     await harness.service.tickOnce();
+    expect(client.postCalls.filter((call) => call.path === "/lol-lobby/v2/lobby")).toHaveLength(lobbyCreateCountBeforeWait);
+
+    harness.advanceTime(302);
+    client.phase = "None";
+    await harness.service.tickOnce();
+    expect(client.postCalls.filter((call) => call.path === "/lol-lobby/v2/lobby")).toHaveLength(lobbyCreateCountBeforeWait + 1);
     expect(client.postCalls.filter((call) => call.path === "/lol-lobby/v2/lobby/matchmaking/search")).toHaveLength(1);
   });
 
-  it("waits 5 minutes before retrying when join queue fails unexpectedly", async () => {
+  it("returns to the League home screen and waits 3 minutes when join queue fails unexpectedly", async () => {
     const client = new FakeLcuClient();
     client.phase = "Lobby";
     client.queuePostError(
@@ -255,15 +260,23 @@ describe("AutoQueueService", () => {
 
     await harness.service.start();
     expect(client.postCalls.filter((call) => call.path === "/lol-lobby/v2/lobby/matchmaking/search")).toHaveLength(1);
+    expect(client.deleteCalls).toContain("/lol-lobby/v2/lobby");
+    expect(harness.logs).toContain(
+      "Attempt to join queue failed. Returning to the League home screen and retrying in 3 minutes."
+    );
+    const lobbyCreateCountBeforeWait = client.postCalls.filter((call) => call.path === "/lol-lobby/v2/lobby").length;
 
-    harness.advanceTime(3 * 60 * 1000 + 1);
-    await harness.service.tickOnce();
-    expect(client.postCalls.filter((call) => call.path === "/lol-lobby/v2/lobby/matchmaking/search")).toHaveLength(1);
-
+    client.phase = "None";
+    client.hasLobby = false;
     harness.advanceTime(2 * 60 * 1000 + 1);
     await harness.service.tickOnce();
+    expect(client.postCalls.filter((call) => call.path === "/lol-lobby/v2/lobby")).toHaveLength(lobbyCreateCountBeforeWait);
+    expect(client.postCalls.filter((call) => call.path === "/lol-lobby/v2/lobby/matchmaking/search")).toHaveLength(1);
+
+    harness.advanceTime(60 * 1000);
+    await harness.service.tickOnce();
+    expect(client.postCalls.filter((call) => call.path === "/lol-lobby/v2/lobby")).toHaveLength(lobbyCreateCountBeforeWait + 1);
     expect(client.postCalls.filter((call) => call.path === "/lol-lobby/v2/lobby/matchmaking/search")).toHaveLength(2);
-    expect(harness.logs).toContain("Join queue failed unexpectedly. Retry after 5 minutes.");
   });
 
   it("accepts ready-check through gameflow events without waiting for the next poll", async () => {
@@ -307,7 +320,7 @@ describe("AutoQueueService", () => {
     expect(client.postCalls.some((call) => call.path === "/lol-gameflow/v1/reconnect")).toBe(true);
     expect(harness.getDismissCrashDialogCalls()).toBe(1);
     expect(harness.logs).toContain("Reconnect state detected. Attempting automatic recovery.");
-    expect(harness.logs).toContain("Detected League crash dialog. Dismissed it before reconnecting.");
+    expect(harness.logs).toContain("Detected a League crash dialog and dismissed it.");
   });
 
   it("returns to lobby instead of reconnecting when the API reports server connection loss", async () => {
@@ -373,22 +386,15 @@ describe("AutoQueueService", () => {
     });
   });
 
-  it("restarts the league client on the configured hourly schedule and recovers queueing", async () => {
-    const firstClient = new FakeLcuClient();
-    firstClient.phase = "InProgress";
-    const recoveredClient = new FakeLcuClient();
-    recoveredClient.phase = "Lobby";
-    const harness = createHarness([firstClient, recoveredClient]);
-    harness.service.updateSettings({ scheduledRestartHours: 1 });
+  it("does not trigger the no-game timeout while sitting in a normal lobby", async () => {
+    const client = new FakeLcuClient();
+    client.phase = "Lobby";
+    const harness = createHarness([client]);
 
     await harness.service.start();
-    harness.advanceTime(60 * 60 * 1000);
-    firstClient.phase = "Lobby";
+    harness.advanceTime(3 * 60 * 1000 + 1);
     await harness.service.tickOnce();
 
-    expect(harness.getRestartLeagueClientCalls()).toBe(1);
-    expect(harness.logs).toContain("Scheduled League client restart triggered.");
-    expect(harness.logs).toContain("League client restarted and recovered.");
-    expect(harness.sleepCalls).toContain(30000);
+    expect(client.deleteCalls).not.toContain("/lol-lobby/v2/lobby");
   });
 });

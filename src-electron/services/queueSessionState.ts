@@ -16,17 +16,27 @@ function isTrackedCyclePhase(phase: GameflowPhase): boolean {
   );
 }
 
+function isPendingGameEntryPhase(phase: GameflowPhase): boolean {
+  return (
+    phase === "Matchmaking" ||
+    phase === "ReadyCheck" ||
+    phase === "ChampSelect" ||
+    phase === "Reconnect" ||
+    phase === "TerminatedInError"
+  );
+}
+
 export class QueueSessionState {
   private tracking: PhaseTrackingState;
   private searchBlockedUntil = 0;
   private lastBlockedLogAt = 0;
+  private stayOnHomeUntilSearchUnblocked = false;
   private lastHomeResetAt = Number.NEGATIVE_INFINITY;
   private lastReconnectAt = Number.NEGATIVE_INFINITY;
   private activeCycleStartedAt: number | null = null;
   private currentPhaseStartedAt: number | null = null;
   private reconnectPhaseStartedAt: number | null = null;
   private noGameStartedAt: number | null = null;
-  private lastClientRestartAt = Number.NEGATIVE_INFINITY;
   private flowState: QueueFlowStateName = "Idle";
 
   constructor(initialStats: { totalCycleCount: number; sessionCycleCount: number }) {
@@ -80,13 +90,13 @@ export class QueueSessionState {
     this.tracking.sessionCycleCount = 0;
     this.searchBlockedUntil = 0;
     this.lastBlockedLogAt = 0;
+    this.stayOnHomeUntilSearchUnblocked = false;
     this.lastHomeResetAt = Number.NEGATIVE_INFINITY;
     this.lastReconnectAt = Number.NEGATIVE_INFINITY;
     this.activeCycleStartedAt = null;
     this.currentPhaseStartedAt = null;
     this.reconnectPhaseStartedAt = null;
     this.noGameStartedAt = null;
-    this.lastClientRestartAt = Number.NEGATIVE_INFINITY;
     this.flowState = "Idle";
   }
 
@@ -97,13 +107,13 @@ export class QueueSessionState {
     this.tracking.pendingPostGameSearchDelay = false;
     this.searchBlockedUntil = 0;
     this.lastBlockedLogAt = 0;
+    this.stayOnHomeUntilSearchUnblocked = false;
     this.lastHomeResetAt = Number.NEGATIVE_INFINITY;
     this.lastReconnectAt = Number.NEGATIVE_INFINITY;
     this.activeCycleStartedAt = null;
     this.currentPhaseStartedAt = null;
     this.reconnectPhaseStartedAt = null;
     this.noGameStartedAt = null;
-    this.lastClientRestartAt = Number.NEGATIVE_INFINITY;
     this.flowState = "Idle";
   }
 
@@ -124,13 +134,25 @@ export class QueueSessionState {
     return transition;
   }
 
-  blockSearch(now: number, durationMs: number): void {
+  blockSearch(now: number, durationMs: number, options: { stayOnHome?: boolean } = {}): void {
     this.searchBlockedUntil = now + durationMs;
     this.lastBlockedLogAt = 0;
+    if (options.stayOnHome) {
+      this.stayOnHomeUntilSearchUnblocked = true;
+    }
   }
 
   isSearchBlocked(now: number): boolean {
     return now < this.searchBlockedUntil;
+  }
+
+  shouldStayOnHome(now: number): boolean {
+    if (now >= this.searchBlockedUntil) {
+      this.stayOnHomeUntilSearchUnblocked = false;
+      return false;
+    }
+
+    return this.stayOnHomeUntilSearchUnblocked;
   }
 
   getSearchBlockRemainingMs(now: number): number {
@@ -209,18 +231,6 @@ export class QueueSessionState {
     this.noGameStartedAt = now;
   }
 
-  markLeagueClientRestart(now: number): void {
-    this.lastClientRestartAt = now;
-  }
-
-  shouldRestartLeagueClient(now: number, intervalMs: number): boolean {
-    if (intervalMs <= 0) {
-      return false;
-    }
-
-    return now - this.lastClientRestartAt >= intervalMs;
-  }
-
   private updateCycleWindow(phase: GameflowPhase, now: number): void {
     if (isTrackedCyclePhase(phase)) {
       if (this.activeCycleStartedAt === null) {
@@ -244,7 +254,7 @@ export class QueueSessionState {
   }
 
   private updateNoGameWindow(phase: GameflowPhase, now: number): void {
-    if (phase !== "InProgress") {
+    if (isPendingGameEntryPhase(phase)) {
       if (this.noGameStartedAt === null) {
         this.noGameStartedAt = this.currentPhaseStartedAt ?? now;
       }
