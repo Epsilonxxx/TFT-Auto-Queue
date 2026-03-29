@@ -127,7 +127,12 @@ class FakeLcuClient implements LcuClientLike {
   }
 }
 
-function createHarness(clients: FakeLcuClient[]) {
+function createHarness(
+  clients: FakeLcuClient[],
+  options: {
+    dismissCrashDialogResult?: "reported" | "dismissed" | "closed" | "not_found" | "not_match" | "error";
+  } = {}
+) {
   let nowValue = 0;
   let createClientIndex = 0;
   const sleepCalls: number[] = [];
@@ -152,7 +157,7 @@ function createHarness(clients: FakeLcuClient[]) {
     clearIntervalFn: () => {},
     dismissCrashDialog: async () => {
       dismissCrashDialogCalls += 1;
-      return "dismissed";
+      return options.dismissCrashDialogResult ?? "dismissed";
     }
   });
 
@@ -320,7 +325,20 @@ describe("AutoQueueService", () => {
     expect(client.postCalls.some((call) => call.path === "/lol-gameflow/v1/reconnect")).toBe(true);
     expect(harness.getDismissCrashDialogCalls()).toBe(1);
     expect(harness.logs).toContain("Reconnect state detected. Attempting automatic recovery.");
-    expect(harness.logs).toContain("Detected a League crash dialog and dismissed it.");
+    expect(harness.logs).toContain("Detected a League crash dialog and handled it.");
+  });
+
+  it("treats a completed crash-report flow as a successful recovery step", async () => {
+    const client = new FakeLcuClient();
+    client.phase = "Reconnect";
+    const harness = createHarness([client], {
+      dismissCrashDialogResult: "reported"
+    });
+
+    await harness.service.start();
+
+    expect(client.postCalls.some((call) => call.path === "/lol-gameflow/v1/reconnect")).toBe(true);
+    expect(harness.logs).toContain("Detected a League crash dialog and completed the crash-report flow.");
   });
 
   it("returns to lobby instead of reconnecting when the API reports server connection loss", async () => {
@@ -396,5 +414,23 @@ describe("AutoQueueService", () => {
     await harness.service.tickOnce();
 
     expect(client.deleteCalls).not.toContain("/lol-lobby/v2/lobby");
+  });
+
+  it("rolls back to a stopped state and exposes the startup error when queue resolution fails", async () => {
+    const client = new FakeLcuClient();
+    client.queues = [];
+    const harness = createHarness([client]);
+
+    await expect(harness.service.start()).rejects.toThrow("Tocker's Trials queue not found.");
+
+    expect(client.closedCount).toBe(1);
+    expect(harness.service.isEnabled).toBe(false);
+    expect(harness.service.getSnapshot()).toMatchObject({
+      enabled: false,
+      queueId: 1220,
+      queueName: "Tocker's Trials",
+      lastError: "Tocker's Trials queue not found."
+    });
+    expect(harness.logs).toContain("Enable failed: Tocker's Trials queue not found.");
   });
 });

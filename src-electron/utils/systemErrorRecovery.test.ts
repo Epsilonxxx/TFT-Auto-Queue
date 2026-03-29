@@ -2,6 +2,18 @@ import { describe, expect, it, vi } from "vitest";
 import { SystemErrorRecovery } from "./systemErrorRecovery";
 
 describe("SystemErrorRecovery", () => {
+  it("returns a reported status when the crash-report flow completes", async () => {
+    const recovery = new SystemErrorRecovery({
+      platform: "win32",
+      execFileImpl: vi.fn(async () => ({
+        stdout: "reported\r\n",
+        stderr: ""
+      })) as never
+    });
+
+    await expect(recovery.dismissLeagueCrashDialog()).resolves.toBe("reported");
+  });
+
   it("returns a successful dismissal status from PowerShell output", async () => {
     const recovery = new SystemErrorRecovery({
       platform: "win32",

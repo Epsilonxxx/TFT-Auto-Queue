@@ -8,6 +8,10 @@ export type TrayControllerOptions = {
   onExit: () => void;
 };
 
+function truncateMenuText(value: string, maxLength = 72): string {
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength - 3)}...`;
+}
+
 function resolveTrayIcon(): Electron.NativeImage {
   const candidates = [
     path.join(process.resourcesPath, "assets", "tray.png"),
@@ -45,13 +49,24 @@ export class TrayController {
       return;
     }
 
-    const status = snapshot.enabled ? "Running" : "Stopped";
+    const status = snapshot.enabled ? "Running" : snapshot.lastError ? "Error" : "Stopped";
     this.tray.setToolTip(`TFT Auto Queue - ${status}`);
+
+    const errorItem = snapshot.lastError
+      ? [
+          {
+            label: `Error: ${truncateMenuText(snapshot.lastError)}`,
+            enabled: false
+          } as const
+        ]
+      : [];
+
     this.tray.setContextMenu(
       Menu.buildFromTemplate([
         { label: `Status: ${status}`, enabled: false },
         { label: `Session Cycles: ${snapshot.sessionCycleCount}`, enabled: false },
         { label: `Total Cycles: ${snapshot.totalCycleCount}`, enabled: false },
+        ...errorItem,
         {
           label: snapshot.enabled ? "Stop (F1)" : "Start (F1)",
           click: this.options.onToggle

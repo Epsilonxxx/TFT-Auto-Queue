@@ -36,6 +36,7 @@ export type ServiceSnapshot = {
   phase: string;
   totalCycleCount: number;
   sessionCycleCount: number;
+  lastError: string | null;
 };
 
 export type LcuClientLike = Pick<LcuClient, "get" | "post" | "delete" | "connectGameflowEvents" | "close">;
@@ -58,7 +59,7 @@ export type AutoQueueServiceDependencies = {
   randomBetween?: (min: number, max: number) => number;
   setIntervalFn?: (callback: () => void, delay: number) => IntervalHandle;
   clearIntervalFn?: (handle: IntervalHandle) => void;
-  dismissCrashDialog?: () => Promise<"dismissed" | "closed" | "not_found" | "not_match" | "error">;
+  dismissCrashDialog?: () => Promise<"reported" | "dismissed" | "closed" | "not_found" | "not_match" | "error">;
 };
 
 function sleep(ms: number): Promise<void> {
@@ -109,6 +110,22 @@ function extractErrorText(err: unknown): string {
     return JSON.stringify(data);
   }
   return err.message ?? "";
+}
+
+function formatErrorMessage(err: unknown): string {
+  if (err instanceof AxiosError) {
+    const text = extractErrorText(err).trim();
+    if (text) {
+      return text;
+    }
+  }
+
+  if (err instanceof Error) {
+    return err.message || err.name;
+  }
+
+  const fallback = String(err ?? "").trim();
+  return fallback || "Unknown error";
 }
 
 function hasTextMatch(input: string, patterns: string[]): boolean {
@@ -163,6 +180,7 @@ export function isPlayersNotReadyError(err: unknown): boolean {
 export class AutoQueueService {
   private lcu: LcuClientLike | null = null;
   private enabled = false;
+  private lastError: string | null = null;
   private handlingObservation = false;
   private pendingObservation: PhaseObservation | null = null;
   private reconnecting = false;
@@ -185,7 +203,7 @@ export class AutoQueueService {
   private readonly randomBetween: (min: number, max: number) => number;
   private readonly setIntervalFn: (callback: () => void, delay: number) => IntervalHandle;
   private readonly clearIntervalFn: (handle: IntervalHandle) => void;
-  private readonly dismissCrashDialog: () => Promise<"dismissed" | "closed" | "not_found" | "not_match" | "error">;
+  private readonly dismissCrashDialog: () => Promise<"reported" | "dismissed" | "closed" | "not_found" | "not_match" | "error">;
 
   constructor(dependencies: AutoQueueServiceDependencies = {}) {
     this.configStore = dependencies.configStore ?? new MemoryConfigStore(this.defaults);
@@ -251,7 +269,8 @@ export class AutoQueueService {
       queueName: this.activeQueueName,
       phase: this.session.phase ?? "Unknown",
       totalCycleCount: this.session.totalCycleCount,
-      sessionCycleCount: this.session.sessionCycleCount
+      sessionCycleCount: this.session.sessionCycleCount,
+      lastError: this.lastError
     };
   }
 
@@ -273,14 +292,20 @@ export class AutoQueueService {
     this.restoreConfig();
     this.session.resetForStart();
     this.enabled = true;
+    this.lastError = null;
     this.persistStats();
 
-    await this.initializeLcuAndQueue();
-    this.bindPhaseMonitor();
+    try {
+      await this.initializeLcuAndQueue();
+      this.bindPhaseMonitor();
 
-    this.logger(`Enabled for queue: ${this.activeQueueName}`);
-    this.emitSnapshot();
-    await this.tickOnce();
+      this.logger(`Enabled for queue: ${this.activeQueueName}`);
+      this.emitSnapshot();
+      await this.tickOnce();
+    } catch (error) {
+      this.rollbackFailedStart(error);
+      throw error;
+    }
   }
 
   async stop(): Promise<void> {
@@ -306,6 +331,7 @@ export class AutoQueueService {
     this.pendingObservation = null;
     this.reconnecting = false;
     this.consecutiveTickFailures = 0;
+    this.lastError = null;
     this.session.resetForStop();
     this.syncActiveQueuePreview();
     this.persistStats();
@@ -357,6 +383,24 @@ export class AutoQueueService {
     for (const listener of this.listeners) {
       listener(snapshot);
     }
+  }
+
+  private rollbackFailedStart(error: unknown): void {
+    this.enabled = false;
+    this.phaseMonitor?.stop();
+    this.phaseMonitor = null;
+    this.lcu?.close();
+    this.lcu = null;
+    this.handlingObservation = false;
+    this.pendingObservation = null;
+    this.reconnecting = false;
+    this.consecutiveTickFailures = 0;
+    this.lastError = formatErrorMessage(error);
+    this.session.resetForStop();
+    this.syncActiveQueuePreview();
+    this.persistStats();
+    this.emitSnapshot();
+    this.logger(`Enable failed: ${this.lastError}`);
   }
 
   private bindPhaseMonitor(): void {
@@ -771,8 +815,14 @@ export class AutoQueueService {
 
   private async tryDismissCrashDialog(): Promise<void> {
     const result = await this.dismissCrashDialog();
+    if (result === "reported") {
+      this.logger("Detected a League crash dialog and completed the crash-report flow.");
+      await this.sleep(300);
+      return;
+    }
+
     if (result === "dismissed" || result === "closed") {
-      this.logger("Detected a League crash dialog and dismissed it.");
+      this.logger("Detected a League crash dialog and handled it.");
       await this.sleep(300);
     }
   }

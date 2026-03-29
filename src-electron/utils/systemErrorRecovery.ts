@@ -3,16 +3,18 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-const POWER_SHELL_DISMISS_SCRIPT = `
+const POWER_SHELL_CRASH_DIALOG_SCRIPT = `
 $windowPatterns = @(
   'system error',
   'critical error',
   'league of legends',
   'riot client',
   'bugsplat',
+  'crash dump',
   '系统错误',
   '严重错误',
-  '崩溃'
+  '崩溃',
+  '崩溃转储'
 )
 $textPatterns = @(
   'critical error has occurred',
@@ -28,7 +30,38 @@ $textPatterns = @(
   '无法连接服务器',
   '客户端已崩溃'
 )
-$preferredButtons = @('No', '否', 'Cancel', '取消', 'Close', '关闭', 'OK', '确定')
+$reportStartPatterns = @(
+  'create a crash dump',
+  'aid the developers',
+  'troubleshooting this issue',
+  'take a full memory dump',
+  'full memory dump',
+  'generate a full memory dump',
+  'create a memory dump',
+  '创建崩溃转储',
+  '生成崩溃转储',
+  '完整内存转储',
+  '完整内存 dump',
+  '创建内存转储'
+)
+$reportCompletePatterns = @(
+  'crash dump was created',
+  'copy this path into your clipboard',
+  'copy this path to your clipboard',
+  'share this file with the development team',
+  'please share this file',
+  'thank you. a crash dump was created',
+  '崩溃转储已创建',
+  '已创建崩溃转储',
+  '复制此路径',
+  '复制到剪贴板',
+  '请将此文件提供给开发团队'
+)
+$preferredButtons = @('Yes', '是', 'OK', '确定', 'Close', '关闭', 'No', '否', 'Cancel', '取消')
+$initialWaitMs = 4000
+$pollIntervalMs = 1200
+$idleExitMs = 2500
+$watchAfterReportStartMs = 6 * 60 * 1000
 
 Add-Type @"
 using System;
@@ -106,101 +139,209 @@ function Contains-Pattern([string]$value, [string[]]$patterns) {
   return $false
 }
 
-$matchedWindow = $null
-
-[Win32Recovery]::EnumWindows({
-  param($hWnd, $lParam)
-
-  if (-not [Win32Recovery]::IsWindowVisible($hWnd)) {
-    return $true
+function Normalize-UiText([string]$value) {
+  if ([string]::IsNullOrWhiteSpace($value)) {
+    return ''
   }
 
-  $title = Get-WindowTextValue $hWnd 512
-  if ([string]::IsNullOrWhiteSpace($title)) {
-    return $true
+  $normalized = $value.ToLowerInvariant().Trim()
+  $normalized = $normalized.Replace('&', '')
+  $normalized = $normalized.Replace('（', '(').Replace('）', ')')
+  $normalized = [System.Text.RegularExpressions.Regex]::Replace($normalized, '[\s\(\)\[\]\{\}]', '')
+  return $normalized
+}
+
+function Matches-ButtonPreference([string]$buttonText, [string]$preference) {
+  $normalizedButton = Normalize-UiText $buttonText
+  $normalizedPreference = Normalize-UiText $preference
+  if ([string]::IsNullOrWhiteSpace($normalizedButton) -or [string]::IsNullOrWhiteSpace($normalizedPreference)) {
+    return $false
   }
 
-  $texts = New-Object System.Collections.Generic.List[string]
-  $buttons = New-Object System.Collections.Generic.List[object]
-  [void]$texts.Add($title)
+  return $normalizedButton -eq $normalizedPreference -or $normalizedButton.StartsWith($normalizedPreference)
+}
 
-  [Win32Recovery]::EnumChildWindows($hWnd, {
-    param($child, $ignored)
+function Get-DialogKind([string]$title, [string]$text) {
+  if ((Contains-Pattern $title @('crash dump')) -or (Contains-Pattern $text $reportCompletePatterns)) {
+    return 'report_complete'
+  }
 
-    $className = Get-ClassNameValue $child
-    $text = Get-WindowTextValue $child
+  if (Contains-Pattern $text $reportStartPatterns) {
+    return 'report_start'
+  }
 
-    if (-not [string]::IsNullOrWhiteSpace($text)) {
-      [void]$texts.Add($text)
+  return 'generic'
+}
+
+function Find-MatchedWindow() {
+  $script:matchedWindow = $null
+
+  [Win32Recovery]::EnumWindows({
+    param($hWnd, $lParam)
+
+    if (-not [Win32Recovery]::IsWindowVisible($hWnd)) {
+      return $true
     }
 
-    if ($className -eq 'Button') {
-      $rect = New-Object Win32Recovery+RECT
-      if ([Win32Recovery]::GetWindowRect($child, [ref]$rect)) {
-        [void]$buttons.Add([pscustomobject]@{
-          Handle = $child
-          Left = $rect.Left
-          Text = ($text ?? '').Trim()
-        })
+    $title = Get-WindowTextValue $hWnd 512
+    if ([string]::IsNullOrWhiteSpace($title)) {
+      return $true
+    }
+
+    $texts = New-Object System.Collections.Generic.List[string]
+    $buttons = New-Object System.Collections.Generic.List[object]
+    [void]$texts.Add($title)
+
+    [Win32Recovery]::EnumChildWindows($hWnd, {
+      param($child, $ignored)
+
+      $className = Get-ClassNameValue $child
+      $text = Get-WindowTextValue $child
+
+      if (-not [string]::IsNullOrWhiteSpace($text)) {
+        [void]$texts.Add($text)
       }
+
+      if ($className -eq 'Button') {
+        $rect = New-Object Win32Recovery+RECT
+        if ([Win32Recovery]::GetWindowRect($child, [ref]$rect)) {
+          [void]$buttons.Add([pscustomobject]@{
+            Handle = $child
+            Left = $rect.Left
+            Text = ($text ?? '').Trim()
+          })
+        }
+      }
+
+      return $true
+    }, [IntPtr]::Zero) | Out-Null
+
+    $joinedText = ($texts -join ' ')
+    $likelyCrashDialog =
+      (Contains-Pattern $title $windowPatterns) -or
+      (Contains-Pattern $joinedText $textPatterns)
+
+    if (-not $likelyCrashDialog) {
+      return $true
     }
 
-    return $true
+    $script:matchedWindow = [pscustomobject]@{
+      Handle = $hWnd
+      Title = $title
+      Text = $joinedText
+      Buttons = $buttons
+      Kind = Get-DialogKind $title $joinedText
+    }
+
+    return $false
   }, [IntPtr]::Zero) | Out-Null
 
-  $joinedText = ($texts -join ' ')
-  $likelyCrashDialog =
-    (Contains-Pattern $title $windowPatterns) -or
-    (Contains-Pattern $joinedText $textPatterns)
+  return $script:matchedWindow
+}
 
-  if (-not $likelyCrashDialog) {
-    return $true
+function Select-TargetButton($window) {
+  foreach ($buttonText in $preferredButtons) {
+    $candidate = $window.Buttons |
+      Where-Object { Matches-ButtonPreference $_.Text $buttonText } |
+      Sort-Object Left |
+      Select-Object -First 1
+
+    if ($null -ne $candidate) {
+      return [pscustomobject]@{
+        Button = $candidate
+        Preference = $buttonText
+      }
+    }
   }
 
-  $script:matchedWindow = [pscustomobject]@{
-    Handle = $hWnd
-    Title = $title
-    Text = $joinedText
-    Buttons = $buttons
+  if ($window.Buttons.Count -gt 0) {
+    return [pscustomobject]@{
+      Button = ($window.Buttons | Sort-Object Left | Select-Object -First 1)
+      Preference = ''
+    }
   }
 
-  return $false
-}, [IntPtr]::Zero) | Out-Null
+  return $null
+}
 
-if ($null -eq $matchedWindow) {
-  Write-Output 'not_found'
+$startedAt = [DateTime]::UtcNow
+$lastHandledAt = $startedAt
+$watchUntil = $startedAt.AddMilliseconds($initialWaitMs)
+$handledCount = 0
+$reportedCount = 0
+
+while ($true) {
+  $matchedWindow = Find-MatchedWindow
+  $now = [DateTime]::UtcNow
+
+  if ($null -eq $matchedWindow) {
+    if ($handledCount -eq 0 -and $now -lt $watchUntil) {
+      Start-Sleep -Milliseconds $pollIntervalMs
+      continue
+    }
+
+    if ($handledCount -eq 0) {
+      Write-Output 'not_found'
+      exit 0
+    }
+
+    if ($now -lt $watchUntil) {
+      Start-Sleep -Milliseconds $pollIntervalMs
+      continue
+    }
+
+    if (($now - $lastHandledAt).TotalMilliseconds -lt $idleExitMs) {
+      Start-Sleep -Milliseconds 300
+      continue
+    }
+
+    break
+  }
+
+  [Win32Recovery]::ShowWindow($matchedWindow.Handle, 5) | Out-Null
+  [Win32Recovery]::SetForegroundWindow($matchedWindow.Handle) | Out-Null
+  Start-Sleep -Milliseconds 120
+
+  $selection = Select-TargetButton $matchedWindow
+  if ($null -ne $selection) {
+    [Win32Recovery]::SendMessage($selection.Button.Handle, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+    $handledCount += 1
+    $lastHandledAt = [DateTime]::UtcNow
+
+    if ((Matches-ButtonPreference $selection.Button.Text 'Yes') -or (Matches-ButtonPreference $selection.Button.Text '是')) {
+      $reportedCount += 1
+    }
+
+    if ($matchedWindow.Kind -eq 'report_start') {
+      $watchUntil = [DateTime]::UtcNow.AddMilliseconds($watchAfterReportStartMs)
+    } elseif ($matchedWindow.Kind -eq 'report_complete') {
+      $watchUntil = [DateTime]::UtcNow.AddMilliseconds($idleExitMs)
+    } else {
+      $watchUntil = [DateTime]::UtcNow.AddMilliseconds([Math]::Max($idleExitMs, $pollIntervalMs))
+    }
+
+    Start-Sleep -Milliseconds $pollIntervalMs
+    continue
+  }
+
+  [Win32Recovery]::PostMessage($matchedWindow.Handle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+  $handledCount += 1
+  $lastHandledAt = [DateTime]::UtcNow
+  $watchUntil = [DateTime]::UtcNow.AddMilliseconds($idleExitMs)
+  Start-Sleep -Milliseconds 500
+}
+
+if ($reportedCount -gt 0) {
+  Write-Output 'reported'
   exit 0
 }
 
-[Win32Recovery]::ShowWindow($matchedWindow.Handle, 5) | Out-Null
-[Win32Recovery]::SetForegroundWindow($matchedWindow.Handle) | Out-Null
-Start-Sleep -Milliseconds 120
-
-$targetButton = $null
-foreach ($buttonText in $preferredButtons) {
-  $candidate = $matchedWindow.Buttons |
-    Where-Object { $_.Text -and $_.Text.Equals($buttonText, [System.StringComparison]::OrdinalIgnoreCase) } |
-    Sort-Object Left |
-    Select-Object -First 1
-
-  if ($null -ne $candidate) {
-    $targetButton = $candidate
-    break
-  }
-}
-
-if ($null -eq $targetButton -and $matchedWindow.Buttons.Count -gt 0) {
-  $targetButton = $matchedWindow.Buttons | Sort-Object Left | Select-Object -First 1
-}
-
-if ($null -ne $targetButton) {
-  [Win32Recovery]::SendMessage($targetButton.Handle, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+if ($handledCount -gt 0) {
   Write-Output 'dismissed'
   exit 0
 }
 
-[Win32Recovery]::PostMessage($matchedWindow.Handle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
-Write-Output 'closed'
+Write-Output 'not_found'
 `.trim();
 
 export type SystemErrorRecoveryDependencies = {
@@ -208,7 +349,7 @@ export type SystemErrorRecoveryDependencies = {
   platform?: NodeJS.Platform;
 };
 
-export type DismissCrashDialogResult = "dismissed" | "closed" | "not_found" | "not_match" | "error";
+export type DismissCrashDialogResult = "reported" | "dismissed" | "closed" | "not_found" | "not_match" | "error";
 
 export class SystemErrorRecovery {
   private readonly execFileImpl: typeof execFileAsync;
@@ -227,7 +368,7 @@ export class SystemErrorRecovery {
     try {
       const { stdout } = await this.execFileImpl(
         "powershell.exe",
-        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", POWER_SHELL_DISMISS_SCRIPT],
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", POWER_SHELL_CRASH_DIALOG_SCRIPT],
         {
           encoding: "utf8",
           windowsHide: true
@@ -236,6 +377,7 @@ export class SystemErrorRecovery {
 
       const result = stdout.trim().toLowerCase();
       if (
+        result === "reported" ||
         result === "dismissed" ||
         result === "closed" ||
         result === "not_found" ||

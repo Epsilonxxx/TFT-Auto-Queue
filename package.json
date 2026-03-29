@@ -1,6 +1,6 @@
 {
   "name": "tft-auto-queue-next",
-  "version": "0.7.0",
+  "version": "0.8.1",
   "description": "TFT Auto Queue desktop app",
   "main": "dist-electron/main.js",
   "scripts": {

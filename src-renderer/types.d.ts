@@ -20,6 +20,7 @@ export type ServiceSnapshot = {
   phase: string;
   totalCycleCount: number;
   sessionCycleCount: number;
+  lastError: string | null;
 };
 
 export type InitialData = {

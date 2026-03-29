@@ -103,7 +103,8 @@ const emptyState: ServiceSnapshot = {
   queueName: "-",
   phase: "-",
   totalCycleCount: 0,
-  sessionCycleCount: 0
+  sessionCycleCount: 0,
+  lastError: null
 };
 
 const emptySettings: AppSettings = {
@@ -645,6 +646,8 @@ export function App() {
               </Stack>
             </CardContent>
           </Card>
+
+          {state.lastError ? <Alert severity="error">{state.lastError}</Alert> : null}
 
           <Box
             sx={{
