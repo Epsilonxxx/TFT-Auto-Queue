@@ -131,6 +131,7 @@ function createHarness(
   clients: FakeLcuClient[],
   options: {
     dismissCrashDialogResult?: "reported" | "dismissed" | "closed" | "not_found" | "not_match" | "error";
+    terminateGameResult?: "terminated" | "not_found" | "error";
   } = {}
 ) {
   let nowValue = 0;
@@ -138,6 +139,7 @@ function createHarness(
   const sleepCalls: number[] = [];
   const logs: string[] = [];
   let dismissCrashDialogCalls = 0;
+  const terminateGameProcessCalls: Array<string | null | undefined> = [];
   const configStore = new MemoryConfigStore(createDefaultAppConfig());
 
   const service = new AutoQueueService({
@@ -158,6 +160,10 @@ function createHarness(
     dismissCrashDialog: async () => {
       dismissCrashDialogCalls += 1;
       return options.dismissCrashDialogResult ?? "dismissed";
+    },
+    terminateGameProcess: async (leagueInstallPath) => {
+      terminateGameProcessCalls.push(leagueInstallPath);
+      return options.terminateGameResult ?? "terminated";
     }
   });
 
@@ -167,6 +173,7 @@ function createHarness(
     logs,
     sleepCalls,
     getDismissCrashDialogCalls: () => dismissCrashDialogCalls,
+    terminateGameProcessCalls,
     advanceTime: (ms: number) => {
       nowValue += ms;
     }
@@ -284,6 +291,28 @@ describe("AutoQueueService", () => {
     expect(client.postCalls.filter((call) => call.path === "/lol-lobby/v2/lobby/matchmaking/search")).toHaveLength(2);
   });
 
+  it("returns to the League home screen after repeated generic matchmaking start failures", async () => {
+    const client = new FakeLcuClient();
+    client.phase = "Lobby";
+    client.queuePostError("/lol-lobby/v2/lobby/matchmaking/search", createAxiosFailure(400, "Lobby state mismatch"));
+    client.queuePostError("/lol-lobby/v2/lobby/matchmaking/search", createAxiosFailure(400, "Lobby state mismatch"));
+    client.queuePostError("/lol-lobby/v2/lobby/matchmaking/search", createAxiosFailure(400, "Lobby state mismatch"));
+
+    const harness = createHarness([client]);
+
+    await harness.service.start();
+    expect(harness.logs).toContain("Matchmaking start failed (1/3): Lobby state mismatch");
+
+    await harness.service.tickOnce();
+    expect(harness.logs).toContain("Matchmaking start failed (2/3): Lobby state mismatch");
+
+    await harness.service.tickOnce();
+    expect(client.deleteCalls).toContain("/lol-lobby/v2/lobby");
+    expect(harness.logs).toContain(
+      "Repeated matchmaking start failures detected (Lobby state mismatch). Returning to the League home screen and retrying in 3 minutes."
+    );
+  });
+
   it("accepts ready-check through gameflow events without waiting for the next poll", async () => {
     const client = new FakeLcuClient();
     client.phase = "Lobby";
@@ -370,23 +399,30 @@ describe("AutoQueueService", () => {
     expect(harness.logs).toContain("Client error state detected. Attempting automatic recovery.");
   });
 
-  it("reconnects once a game cycle exceeds the configured timeout", async () => {
+  it("force-closes the stuck game once a game cycle exceeds the configured timeout", async () => {
     const client = new FakeLcuClient();
     client.phase = "InProgress";
     const harness = createHarness([client]);
-    harness.service.updateSettings({ cycleReconnectTimeoutMs: 5000 });
+    harness.service.updateSettings({
+      cycleReconnectTimeoutMs: 5000,
+      leagueInstallPath: "E:\\Riot Games\\League of Legends"
+    });
 
     await harness.service.start();
 
     harness.advanceTime(5000);
     await harness.service.tickOnce();
 
-    expect(client.postCalls.filter((call) => call.path === "/lol-gameflow/v1/reconnect")).toHaveLength(1);
-    expect(harness.logs).toContain("Cycle exceeded timeout. Attempting reconnect recovery.");
+    expect(harness.terminateGameProcessCalls).toEqual(["E:\\Riot Games\\League of Legends"]);
+    expect(client.postCalls.filter((call) => call.path === "/lol-gameflow/v1/reconnect")).toHaveLength(0);
+    expect(client.postCalls.filter((call) => call.path === "/lol-gameflow/v1/session/request-lobby")).toHaveLength(1);
+    expect(harness.logs).toContain("Same match exceeded 5 seconds. Force-closing the game and restarting queue.");
+    expect(harness.logs).toContain("Force-closed the League game process.");
+    expect(harness.logs).toContain("Requested return to lobby after force-closing the game.");
 
     harness.advanceTime(4000);
     await harness.service.tickOnce();
-    expect(client.postCalls.filter((call) => call.path === "/lol-gameflow/v1/reconnect")).toHaveLength(1);
+    expect(harness.terminateGameProcessCalls).toHaveLength(1);
   });
 
   it("persists completed cycle counters into the config store", async () => {

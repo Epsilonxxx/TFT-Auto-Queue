@@ -110,6 +110,7 @@ const emptyState: ServiceSnapshot = {
 const emptySettings: AppSettings = {
   language: "zh-CN",
   queueId: null,
+  leagueInstallPath: null,
   autoCancelOnDisable: true,
   postGameDelayMinMs: 1000,
   postGameDelayMaxMs: 2000,
@@ -123,6 +124,7 @@ const emptySettings: AppSettings = {
 type SettingsFormState = {
   language: AppLanguage;
   queueId: string;
+  leagueInstallPath: string;
   autoCancelOnDisable: boolean;
   pollIntervalSeconds: string;
   postGameDelayMinSeconds: string;
@@ -152,23 +154,25 @@ const translations = {
     statsPhase: "阶段",
     statsSession: "本次运行",
     statsTotal: "总次数",
-    manualQueue: "自定义队列",
-    queueTockers: "发条鸟的试炼",
-    fieldsLanguage: "界面语言",
-    fieldsQueueId: "队列 ID",
-    fieldsPollInterval: "轮询间隔",
-    fieldsPostGameDelayMin: "结算后最小延迟",
-    fieldsPostGameDelayMax: "结算后最大延迟",
-    fieldsQueueRetryBlock: "匹配失败等待",
-    fieldsHomeResetCooldown: "回主页冷却",
-    fieldsReconnectCooldown: "重连冷却",
-    fieldsCycleReconnectTimeout: "单局超时重连",
-    fieldsAutoCancelOnDisable: "关闭自动匹配时取消当前搜索",
-    generalSection: "基础设置",
-    timingSection: "时序设置",
-    recoverySection: "恢复设置",
-    queueIdError: "队列 ID 必须是正整数，或留空。",
-    positiveNumberError: "请输入大于 0 的数字。",
+     manualQueue: "自定义队列",
+     queueTockers: "发条鸟的试炼",
+     fieldsLanguage: "界面语言",
+     fieldsQueueId: "队列 ID",
+     fieldsLeagueInstallPath: "League 安装目录",
+     fieldsPollInterval: "轮询间隔",
+     fieldsPostGameDelayMin: "结算后最小延迟",
+     fieldsPostGameDelayMax: "结算后最大延迟",
+     fieldsQueueRetryBlock: "匹配失败等待",
+     fieldsHomeResetCooldown: "回主页冷却",
+     fieldsReconnectCooldown: "重连冷却",
+     fieldsCycleReconnectTimeout: "单局卡死超时",
+     fieldsAutoCancelOnDisable: "关闭自动匹配时取消当前搜索",
+     generalSection: "基础设置",
+     timingSection: "时序设置",
+     recoverySection: "恢复设置",
+     leagueInstallPathPlaceholder: "留空时自动探测，例如 E:\\Riot Games\\League of Legends",
+     queueIdError: "队列 ID 必须是正整数，或留空。",
+     positiveNumberError: "请输入大于 0 的数字。",
     maxDelayError: "最大延迟必须大于或等于最小延迟。",
     languageChinese: "简体中文",
     languageEnglish: "English",
@@ -205,23 +209,25 @@ const translations = {
     statsPhase: "Phase",
     statsSession: "Current Session",
     statsTotal: "Total Runs",
-    manualQueue: "Manual Queue",
-    queueTockers: "Tocker's Trials",
-    fieldsLanguage: "Language",
-    fieldsQueueId: "Queue ID",
-    fieldsPollInterval: "Poll Interval",
-    fieldsPostGameDelayMin: "Post-game Delay Min",
-    fieldsPostGameDelayMax: "Post-game Delay Max",
-    fieldsQueueRetryBlock: "Queue Retry Wait",
-    fieldsHomeResetCooldown: "Home Reset Cooldown",
-    fieldsReconnectCooldown: "Reconnect Cooldown",
-    fieldsCycleReconnectTimeout: "Cycle Reconnect Timeout",
-    fieldsAutoCancelOnDisable: "Cancel current search when disabling auto queue",
-    generalSection: "General",
-    timingSection: "Timing",
-    recoverySection: "Recovery",
-    queueIdError: "Queue ID must be a positive integer or left blank.",
-    positiveNumberError: "Enter a number greater than 0.",
+     manualQueue: "Manual Queue",
+     queueTockers: "Tocker's Trials",
+     fieldsLanguage: "Language",
+     fieldsQueueId: "Queue ID",
+     fieldsLeagueInstallPath: "League Install Path",
+     fieldsPollInterval: "Poll Interval",
+     fieldsPostGameDelayMin: "Post-game Delay Min",
+     fieldsPostGameDelayMax: "Post-game Delay Max",
+     fieldsQueueRetryBlock: "Queue Retry Wait",
+     fieldsHomeResetCooldown: "Home Reset Cooldown",
+     fieldsReconnectCooldown: "Reconnect Cooldown",
+     fieldsCycleReconnectTimeout: "Stuck Match Timeout",
+     fieldsAutoCancelOnDisable: "Cancel current search when disabling auto queue",
+     generalSection: "General",
+     timingSection: "Timing",
+     recoverySection: "Recovery",
+     leagueInstallPathPlaceholder: "Leave blank to auto-detect, for example E:\\Riot Games\\League of Legends",
+     queueIdError: "Queue ID must be a positive integer or left blank.",
+     positiveNumberError: "Enter a number greater than 0.",
     maxDelayError: "Max delay must be greater than or equal to min delay.",
     languageChinese: "简体中文",
     languageEnglish: "English",
@@ -257,6 +263,7 @@ function settingsToForm(settings: AppSettings): SettingsFormState {
   return {
     language: settings.language,
     queueId: settings.queueId === null ? "" : String(settings.queueId),
+    leagueInstallPath: settings.leagueInstallPath ?? "",
     autoCancelOnDisable: settings.autoCancelOnDisable,
     pollIntervalSeconds: formatSeconds(settings.pollIntervalMs),
     postGameDelayMinSeconds: formatSeconds(settings.postGameDelayMinMs),
@@ -357,6 +364,7 @@ function validateSettingsForm(
     payload: {
       language: form.language,
       queueId,
+      leagueInstallPath: form.leagueInstallPath.trim() === "" ? null : form.leagueInstallPath.trim(),
       autoCancelOnDisable: form.autoCancelOnDisable,
       pollIntervalMs: pollIntervalMs ?? undefined,
       postGameDelayMinMs: postGameDelayMinMs ?? undefined,
@@ -700,6 +708,14 @@ export function App() {
                       onChange={(event) => updateFormField("queueId", event.target.value)}
                       error={Boolean(settingsErrors.queueId)}
                       helperText={renderHelperText(settingsErrors.queueId)}
+                      fullWidth
+                    />
+
+                    <TextField
+                      label={t.fieldsLeagueInstallPath}
+                      value={settingsForm.leagueInstallPath}
+                      onChange={(event) => updateFormField("leagueInstallPath", event.target.value)}
+                      placeholder={t.leagueInstallPathPlaceholder}
                       fullWidth
                     />
                   </Box>

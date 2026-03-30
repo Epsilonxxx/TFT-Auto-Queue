@@ -8,9 +8,10 @@ import {
 } from "../config/appConfig";
 import type { GameflowPhase, LcuClient } from "../lcu/client";
 import { LcuClient as RiotLcuClient } from "../lcu/client";
-import type { LcuCredentials } from "../lcu/discovery";
+import type { DiscoverLcuCredentialsOptions, LcuCredentials } from "../lcu/discovery";
 import { discoverLcuCredentials } from "../lcu/discovery";
 import { log } from "../utils/logger";
+import { LeagueGameRecovery, type TerminateGameProcessResult } from "../utils/leagueGameRecovery";
 import { SystemErrorRecovery } from "../utils/systemErrorRecovery";
 import { PhaseMonitor, type PhaseObservation } from "./phaseMonitor";
 import { QueueStateMachine, type QueueFlowContext } from "./queueFlowStates";
@@ -51,7 +52,7 @@ const GAME_ENTRY_RETRY_DELAY_MS = 2 * 60 * 1000;
 
 export type AutoQueueServiceDependencies = {
   configStore?: AppConfigStore;
-  discoverCredentials?: () => LcuCredentials;
+  discoverCredentials?: (options?: DiscoverLcuCredentialsOptions) => LcuCredentials;
   createLcuClient?: (credentials: LcuCredentials) => LcuClientLike;
   logger?: (message: string) => void;
   sleep?: (ms: number) => Promise<void>;
@@ -60,6 +61,7 @@ export type AutoQueueServiceDependencies = {
   setIntervalFn?: (callback: () => void, delay: number) => IntervalHandle;
   clearIntervalFn?: (handle: IntervalHandle) => void;
   dismissCrashDialog?: () => Promise<"reported" | "dismissed" | "closed" | "not_found" | "not_match" | "error">;
+  terminateGameProcess?: (leagueInstallPath?: string | null) => Promise<TerminateGameProcessResult>;
 };
 
 function sleep(ms: number): Promise<void> {
@@ -177,6 +179,28 @@ export function isPlayersNotReadyError(err: unknown): boolean {
   ]);
 }
 
+export function isUnableToEnterMatchmakingQueueError(err: unknown): boolean {
+  return hasTextMatch(extractErrorText(err), [
+    "\u65e0\u6cd5\u8fdb\u5165\u5339\u914d\u961f\u5217",
+    "\u65e0\u6cd5\u5f00\u59cb\u5339\u914d",
+    "\u65e0\u6cd5\u52a0\u5165\u961f\u5217",
+    "unable to enter matchmaking queue",
+    "unable to start matchmaking",
+    "unable to join the matchmaking queue",
+    "failed to start matchmaking"
+  ]);
+}
+
+function formatDurationMs(ms: number): string {
+  const totalSeconds = Math.max(1, Math.round(ms / 1000));
+  if (totalSeconds % 60 === 0) {
+    const minutes = totalSeconds / 60;
+    return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  }
+
+  return `${totalSeconds} second${totalSeconds === 1 ? "" : "s"}`;
+}
+
 export class AutoQueueService {
   private lcu: LcuClientLike | null = null;
   private enabled = false;
@@ -185,6 +209,7 @@ export class AutoQueueService {
   private pendingObservation: PhaseObservation | null = null;
   private reconnecting = false;
   private consecutiveTickFailures = 0;
+  private consecutiveSearchFailures = 0;
   private phaseMonitor: PhaseMonitor | null = null;
   private readonly listeners = new Set<SnapshotListener>();
   private readonly configStore: AppConfigStore;
@@ -195,7 +220,7 @@ export class AutoQueueService {
   private activeQueueId = 1220;
   private activeQueueName = "Tocker's Trials";
 
-  private readonly discoverCredentials: () => LcuCredentials;
+  private readonly discoverCredentials: (options?: DiscoverLcuCredentialsOptions) => LcuCredentials;
   private readonly createLcuClient: (credentials: LcuCredentials) => LcuClientLike;
   private readonly logger: (message: string) => void;
   private readonly sleep: (ms: number) => Promise<void>;
@@ -204,6 +229,7 @@ export class AutoQueueService {
   private readonly setIntervalFn: (callback: () => void, delay: number) => IntervalHandle;
   private readonly clearIntervalFn: (handle: IntervalHandle) => void;
   private readonly dismissCrashDialog: () => Promise<"reported" | "dismissed" | "closed" | "not_found" | "not_match" | "error">;
+  private readonly terminateGameProcess: (leagueInstallPath?: string | null) => Promise<TerminateGameProcessResult>;
 
   constructor(dependencies: AutoQueueServiceDependencies = {}) {
     this.configStore = dependencies.configStore ?? new MemoryConfigStore(this.defaults);
@@ -211,6 +237,7 @@ export class AutoQueueService {
 
     this.settings = { ...persisted.settings };
     this.session = new QueueSessionState(persisted.stats);
+    this.lastError = this.configStore.consumeLoadWarning?.() ?? null;
 
     this.discoverCredentials = dependencies.discoverCredentials ?? discoverLcuCredentials;
     this.createLcuClient = dependencies.createLcuClient ?? ((credentials) => new RiotLcuClient(credentials));
@@ -222,6 +249,9 @@ export class AutoQueueService {
     this.clearIntervalFn = dependencies.clearIntervalFn ?? clearInterval;
     this.dismissCrashDialog =
       dependencies.dismissCrashDialog ?? (() => new SystemErrorRecovery().dismissLeagueCrashDialog());
+    this.terminateGameProcess =
+      dependencies.terminateGameProcess ??
+      ((leagueInstallPath) => new LeagueGameRecovery().terminateLeagueGameProcess(leagueInstallPath));
     this.syncActiveQueuePreview();
   }
 
@@ -331,6 +361,7 @@ export class AutoQueueService {
     this.pendingObservation = null;
     this.reconnecting = false;
     this.consecutiveTickFailures = 0;
+    this.consecutiveSearchFailures = 0;
     this.lastError = null;
     this.session.resetForStop();
     this.syncActiveQueuePreview();
@@ -450,6 +481,9 @@ export class AutoQueueService {
     }
 
     this.consecutiveTickFailures = 0;
+    if (phase === "Matchmaking" || phase === "ReadyCheck" || phase === "ChampSelect" || phase === "InProgress") {
+      this.consecutiveSearchFailures = 0;
+    }
     const transition = this.session.observePhase(phase, this.now());
 
     if (transition.phaseChanged) {
@@ -493,8 +527,9 @@ export class AutoQueueService {
       handleGameEntryPhase: (phase) => this.handleGameEntryPhase(phase),
       handleReconnectPhase: () => this.handleReconnectPhase(),
       tryReconnectRecovery: (reason, options) => this.tryReconnectRecovery(reason, options),
-      shouldReconnectForTimeout: () =>
-        this.session.shouldReconnectForTimeout(this.now(), this.settings.cycleReconnectTimeoutMs)
+      shouldRecoverFromCycleTimeout: () =>
+        this.session.shouldReconnectForTimeout(this.now(), this.settings.cycleReconnectTimeoutMs),
+      handleCycleTimeout: () => this.handleCycleTimeout()
     };
   }
 
@@ -559,15 +594,18 @@ export class AutoQueueService {
 
     try {
       await this.lcu.post("/lol-lobby/v2/lobby/matchmaking/search");
+      this.consecutiveSearchFailures = 0;
       this.logger("Search started.");
     } catch (err) {
       if (isPlayersNotReadyError(err)) {
+        this.consecutiveSearchFailures = 0;
         this.logger("Players are not ready. Leaving current lobby and retrying.");
         await this.recoverToHomeAndRetry();
         return;
       }
 
       if (isAttemptToJoinQueueFailedError(err)) {
+        this.consecutiveSearchFailures = 0;
         await this.returnToHomePageAndWait(
           "Attempt to join queue failed. Returning to the League home screen and retrying in 3 minutes.",
           ATTEMPT_JOIN_QUEUE_RETRY_MS
@@ -576,12 +614,22 @@ export class AutoQueueService {
       }
 
       if (isQueueLimitedError(err)) {
+        this.consecutiveSearchFailures = 0;
         this.session.blockSearch(this.now(), this.settings.queueRetryBlockMs);
         this.logger("Queue limited by server. Retry after 3 minutes.");
         return;
       }
 
-      if (isHttpStatus(err, 400) || isHttpStatus(err, 409) || isHttpStatus(err, 429)) {
+      if (isUnableToEnterMatchmakingQueueError(err)) {
+        await this.handleSearchStartFailure(
+          err,
+          "Unable to enter matchmaking queue. Returning to the League home screen and retrying in 3 minutes."
+        );
+        return;
+      }
+
+      if (isHttpStatus(err, 400) || isHttpStatus(err, 409) || isHttpStatus(err, 422) || isHttpStatus(err, 429)) {
+        await this.handleSearchStartFailure(err);
         return;
       }
 
@@ -599,6 +647,7 @@ export class AutoQueueService {
       return;
     }
     this.session.markHomeReset(now);
+    this.consecutiveSearchFailures = 0;
 
     try {
       await this.lcu.delete("/lol-lobby/v2/lobby");
@@ -655,6 +704,13 @@ export class AutoQueueService {
     await this.tryReconnectRecovery("Reconnect state detected. Attempting automatic recovery.");
   }
 
+  private async handleCycleTimeout(): Promise<void> {
+    const timeoutText = formatDurationMs(this.settings.cycleReconnectTimeoutMs);
+    await this.forceQuitGameAndRecover(
+      `Same match exceeded ${timeoutText}. Force-closing the game and restarting queue.`
+    );
+  }
+
   private async handlePostGamePhase(): Promise<void> {
     if (!this.lcu) {
       return;
@@ -697,6 +753,23 @@ export class AutoQueueService {
     this.logger(reason);
     await this.tryDismissCrashDialog();
     await this.tryReconnectGameSession();
+  }
+
+  private async handleSearchStartFailure(error: unknown, forcedReason?: string): Promise<void> {
+    this.consecutiveSearchFailures += 1;
+    const errorText = formatErrorMessage(error);
+
+    if (forcedReason || this.consecutiveSearchFailures >= 3) {
+      this.consecutiveSearchFailures = 0;
+      await this.returnToHomePageAndWait(
+        forcedReason ??
+          `Repeated matchmaking start failures detected (${errorText}). Returning to the League home screen and retrying in 3 minutes.`,
+        ATTEMPT_JOIN_QUEUE_RETRY_MS
+      );
+      return;
+    }
+
+    this.logger(`Matchmaking start failed (${this.consecutiveSearchFailures}/3): ${errorText}`);
   }
 
   private async tryReconnectGameSession(): Promise<void> {
@@ -773,7 +846,9 @@ export class AutoQueueService {
   }
 
   private async initializeLcuAndQueue(): Promise<void> {
-    const credentials = this.discoverCredentials();
+    const credentials = this.discoverCredentials({
+      leagueInstallPath: this.settings.leagueInstallPath
+    });
     this.lcu = this.createLcuClient(credentials);
 
     const queue = await this.resolveQueue();
@@ -825,6 +900,47 @@ export class AutoQueueService {
       this.logger("Detected a League crash dialog and handled it.");
       await this.sleep(300);
     }
+  }
+
+  private async forceQuitGameAndRecover(reason: string): Promise<void> {
+    if (!this.lcu) {
+      return;
+    }
+
+    const now = this.now();
+    if (!this.session.canResetHome(now, this.settings.homeResetCooldownMs)) {
+      return;
+    }
+
+    this.session.markHomeReset(now);
+    this.session.markReconnect(now, { resetCycleTimer: true });
+    this.session.resetNoGameTimer(now);
+    this.consecutiveSearchFailures = 0;
+    this.logger(reason);
+
+    const terminateResult = await this.terminateGameProcess(this.settings.leagueInstallPath);
+    if (terminateResult === "terminated") {
+      this.logger("Force-closed the League game process.");
+    } else if (terminateResult === "not_found") {
+      this.logger("No active League game process was found. Continuing recovery.");
+    } else {
+      this.logger("Failed to force-close the League game process. Continuing recovery.");
+    }
+
+    await this.sleep(3000);
+    await this.tryDismissCrashDialog();
+    await this.tryPost("/lol-gameflow/v1/ack-failed-to-launch");
+    const requestedLobby = await this.tryPost("/lol-gameflow/v1/session/request-lobby");
+    if (requestedLobby) {
+      this.logger("Requested return to lobby after force-closing the game.");
+    }
+
+    await this.sleep(1200);
+    if (!this.enabled || !this.lcu) {
+      return;
+    }
+
+    await this.ensureLobbyAndSearch();
   }
 
   private async hasConnectionLostSignal(): Promise<boolean> {
@@ -880,6 +996,7 @@ export class AutoQueueService {
     this.session.markHomeReset(now);
     this.session.resetNoGameTimer(now);
     this.session.blockSearch(now, retryDelayMs, { stayOnHome: true });
+    this.consecutiveSearchFailures = 0;
     this.logger(reason);
     await this.tryDismissCrashDialog();
 
@@ -902,6 +1019,7 @@ export class AutoQueueService {
 
     this.session.markHomeReset(now);
     this.session.resetNoGameTimer(now);
+    this.consecutiveSearchFailures = 0;
     this.logger(reason);
     if (retryDelayMs > 0) {
       this.session.blockSearch(now, retryDelayMs);

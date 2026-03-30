@@ -3,6 +3,7 @@ export type AppLanguage = "zh-CN" | "en-US";
 export type AppSettings = {
   language: AppLanguage;
   queueId: number | null;
+  leagueInstallPath: string | null;
   autoCancelOnDisable: boolean;
   postGameDelayMinMs: number;
   postGameDelayMaxMs: number;

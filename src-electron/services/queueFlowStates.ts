@@ -17,7 +17,8 @@ export type QueueFlowContext = {
       resetCycleTimer?: boolean;
     }
   ) => Promise<void>;
-  shouldReconnectForTimeout: () => boolean;
+  shouldRecoverFromCycleTimeout: () => boolean;
+  handleCycleTimeout: () => Promise<void>;
 };
 
 export interface QueueFlowState {
@@ -89,10 +90,8 @@ class InGameQueueState implements QueueFlowState {
       return;
     }
 
-    if (context.shouldReconnectForTimeout()) {
-      await context.tryReconnectRecovery("Cycle exceeded timeout. Attempting reconnect recovery.", {
-        resetCycleTimer: true
-      });
+    if (context.shouldRecoverFromCycleTimeout()) {
+      await context.handleCycleTimeout();
     }
   }
 }

@@ -6,6 +6,7 @@ export type AppLanguage = "zh-CN" | "en-US";
 export type AppSettings = {
   language: AppLanguage;
   queueId: number | null;
+  leagueInstallPath: string | null;
   autoCancelOnDisable: boolean;
   postGameDelayMinMs: number;
   postGameDelayMaxMs: number;
@@ -31,6 +32,7 @@ export interface AppConfigStore {
   get(): PersistedAppConfig;
   set(next: PersistedAppConfig): PersistedAppConfig;
   update(updater: (current: PersistedAppConfig) => PersistedAppConfig): PersistedAppConfig;
+  consumeLoadWarning?(): string | null;
 }
 
 const CONFIG_VERSION = 1;
@@ -41,6 +43,11 @@ function readOptionalNumber(raw: string | undefined): number | null {
   }
   const parsed = Number(raw.trim());
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function readOptionalString(raw: string | undefined): string | null {
+  const value = raw?.trim();
+  return value ? value : null;
 }
 
 function readOptionalPositive(raw: string | undefined, fallback: number): number {
@@ -58,6 +65,7 @@ function cloneConfig(config: PersistedAppConfig): PersistedAppConfig {
 
 export function createDefaultAppConfig(env: NodeJS.ProcessEnv = process.env): PersistedAppConfig {
   const queueId = readOptionalNumber(env.TFT_QUEUE_ID);
+  const leagueInstallPath = readOptionalString(env.LEAGUE_INSTALL_PATH);
   const postGameDelayMinMs = readOptionalPositive(env.POST_GAME_DELAY_MIN_MS, 1000);
   const postGameDelayMaxMs = readOptionalPositive(env.POST_GAME_DELAY_MAX_MS, 2000);
 
@@ -66,6 +74,7 @@ export function createDefaultAppConfig(env: NodeJS.ProcessEnv = process.env): Pe
     settings: {
       language: env.APP_LANGUAGE === "en-US" ? "en-US" : "zh-CN",
       queueId,
+      leagueInstallPath,
       autoCancelOnDisable: (env.AUTO_CANCEL_ON_DISABLE ?? "true").toLowerCase() === "true",
       postGameDelayMinMs: Math.min(postGameDelayMinMs, postGameDelayMaxMs),
       postGameDelayMaxMs: Math.max(postGameDelayMinMs, postGameDelayMaxMs),
@@ -106,6 +115,12 @@ export function normalizeAppConfig(
           : typeof settings.queueId === "number" && Number.isFinite(settings.queueId)
             ? settings.queueId
             : defaults.settings.queueId,
+      leagueInstallPath:
+        typeof settings.leagueInstallPath === "string" && settings.leagueInstallPath.trim().length > 0
+          ? settings.leagueInstallPath.trim()
+          : settings.leagueInstallPath === null
+            ? null
+            : defaults.settings.leagueInstallPath,
       autoCancelOnDisable:
         typeof settings.autoCancelOnDisable === "boolean"
           ? settings.autoCancelOnDisable
@@ -150,6 +165,23 @@ export function resolveConfigFilePath(userDataDir: string): string {
   return path.join(userDataDir, "tft-auto-queue.config.json");
 }
 
+function resolveBackupFilePath(filePath: string): string {
+  return `${filePath}.bak`;
+}
+
+function createCorruptFilePath(filePath: string, now: Date = new Date()): string {
+  const stamp = [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, "0"),
+    String(now.getDate()).padStart(2, "0"),
+    "-",
+    String(now.getHours()).padStart(2, "0"),
+    String(now.getMinutes()).padStart(2, "0"),
+    String(now.getSeconds()).padStart(2, "0")
+  ].join("");
+  return `${filePath}.corrupt-${stamp}`;
+}
+
 export class MemoryConfigStore implements AppConfigStore {
   private current: PersistedAppConfig;
 
@@ -174,6 +206,7 @@ export class MemoryConfigStore implements AppConfigStore {
 
 export class JsonConfigStore implements AppConfigStore {
   private current: PersistedAppConfig;
+  private pendingLoadWarning: string | null = null;
 
   constructor(
     private readonly filePath: string,
@@ -198,6 +231,12 @@ export class JsonConfigStore implements AppConfigStore {
     return this.get();
   }
 
+  consumeLoadWarning(): string | null {
+    const warning = this.pendingLoadWarning;
+    this.pendingLoadWarning = null;
+    return warning;
+  }
+
   private load(defaults: PersistedAppConfig): PersistedAppConfig {
     const dirPath = path.dirname(this.filePath);
     fs.mkdirSync(dirPath, { recursive: true });
@@ -216,14 +255,85 @@ export class JsonConfigStore implements AppConfigStore {
       this.persist();
       return normalized;
     } catch {
+      const archivedPath = this.archiveCorruptPrimaryFile();
+      const backupPath = resolveBackupFilePath(this.filePath);
+      const recoveredFromBackup = this.tryLoadConfigFile(backupPath, defaults);
+      if (recoveredFromBackup) {
+        this.current = recoveredFromBackup;
+        this.pendingLoadWarning = archivedPath
+          ? `配置文件已损坏，已从备份恢复。损坏文件已另存为：${archivedPath}`
+          : "配置文件已损坏，已从备份恢复。";
+        this.persist();
+        return recoveredFromBackup;
+      }
+
       const recovered = normalizeAppConfig(defaults, defaults);
       this.current = recovered;
+      this.pendingLoadWarning = archivedPath
+        ? `配置文件已损坏，已回退默认配置。损坏文件已另存为：${archivedPath}`
+        : "配置文件已损坏，已回退默认配置。";
       this.persist();
       return recovered;
     }
   }
 
+  private tryLoadConfigFile(filePath: string, defaults: PersistedAppConfig): PersistedAppConfig | null {
+    if (!fs.existsSync(filePath)) {
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as Partial<PersistedAppConfig>;
+      return normalizeAppConfig(parsed, defaults);
+    } catch {
+      return null;
+    }
+  }
+
+  private archiveCorruptPrimaryFile(): string | null {
+    if (!fs.existsSync(this.filePath)) {
+      return null;
+    }
+
+    const archivedPath = createCorruptFilePath(this.filePath);
+    try {
+      fs.copyFileSync(this.filePath, archivedPath);
+      return archivedPath;
+    } catch {
+      return null;
+    }
+  }
+
   private persist(): void {
-    fs.writeFileSync(this.filePath, `${JSON.stringify(this.current, null, 2)}\n`, "utf8");
+    const tempPath = `${this.filePath}.tmp`;
+    const backupPath = resolveBackupFilePath(this.filePath);
+    const serialized = `${JSON.stringify(this.current, null, 2)}\n`;
+
+    fs.writeFileSync(tempPath, serialized, "utf8");
+
+    let currentMovedToBackup = false;
+    try {
+      if (fs.existsSync(backupPath)) {
+        fs.rmSync(backupPath, { force: true });
+      }
+
+      if (fs.existsSync(this.filePath)) {
+        fs.renameSync(this.filePath, backupPath);
+        currentMovedToBackup = true;
+      }
+
+      fs.renameSync(tempPath, this.filePath);
+      fs.copyFileSync(this.filePath, backupPath);
+    } catch (error) {
+      if (!fs.existsSync(this.filePath) && currentMovedToBackup && fs.existsSync(backupPath)) {
+        fs.copyFileSync(backupPath, this.filePath);
+      }
+
+      throw error;
+    } finally {
+      if (fs.existsSync(tempPath)) {
+        fs.rmSync(tempPath, { force: true });
+      }
+    }
   }
 }
