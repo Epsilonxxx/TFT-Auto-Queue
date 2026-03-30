@@ -403,17 +403,14 @@ describe("AutoQueueService", () => {
     const client = new FakeLcuClient();
     client.phase = "InProgress";
     const harness = createHarness([client]);
-    harness.service.updateSettings({
-      cycleReconnectTimeoutMs: 5000,
-      leagueInstallPath: "E:\\Riot Games\\League of Legends"
-    });
+    harness.service.updateSettings({ cycleReconnectTimeoutMs: 5000 });
 
     await harness.service.start();
 
     harness.advanceTime(5000);
     await harness.service.tickOnce();
 
-    expect(harness.terminateGameProcessCalls).toEqual(["E:\\Riot Games\\League of Legends"]);
+    expect(harness.terminateGameProcessCalls).toEqual([undefined]);
     expect(client.postCalls.filter((call) => call.path === "/lol-gameflow/v1/reconnect")).toHaveLength(0);
     expect(client.postCalls.filter((call) => call.path === "/lol-gameflow/v1/session/request-lobby")).toHaveLength(1);
     expect(harness.logs).toContain("Same match exceeded 5 seconds. Force-closing the game and restarting queue.");

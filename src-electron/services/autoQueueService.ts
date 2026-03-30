@@ -8,7 +8,7 @@ import {
 } from "../config/appConfig";
 import type { GameflowPhase, LcuClient } from "../lcu/client";
 import { LcuClient as RiotLcuClient } from "../lcu/client";
-import type { DiscoverLcuCredentialsOptions, LcuCredentials } from "../lcu/discovery";
+import type { LcuCredentials } from "../lcu/discovery";
 import { discoverLcuCredentials } from "../lcu/discovery";
 import { log } from "../utils/logger";
 import { LeagueGameRecovery, type TerminateGameProcessResult } from "../utils/leagueGameRecovery";
@@ -52,7 +52,7 @@ const GAME_ENTRY_RETRY_DELAY_MS = 2 * 60 * 1000;
 
 export type AutoQueueServiceDependencies = {
   configStore?: AppConfigStore;
-  discoverCredentials?: (options?: DiscoverLcuCredentialsOptions) => LcuCredentials;
+  discoverCredentials?: () => LcuCredentials;
   createLcuClient?: (credentials: LcuCredentials) => LcuClientLike;
   logger?: (message: string) => void;
   sleep?: (ms: number) => Promise<void>;
@@ -220,7 +220,7 @@ export class AutoQueueService {
   private activeQueueId = 1220;
   private activeQueueName = "Tocker's Trials";
 
-  private readonly discoverCredentials: (options?: DiscoverLcuCredentialsOptions) => LcuCredentials;
+  private readonly discoverCredentials: () => LcuCredentials;
   private readonly createLcuClient: (credentials: LcuCredentials) => LcuClientLike;
   private readonly logger: (message: string) => void;
   private readonly sleep: (ms: number) => Promise<void>;
@@ -237,7 +237,6 @@ export class AutoQueueService {
 
     this.settings = { ...persisted.settings };
     this.session = new QueueSessionState(persisted.stats);
-    this.lastError = this.configStore.consumeLoadWarning?.() ?? null;
 
     this.discoverCredentials = dependencies.discoverCredentials ?? discoverLcuCredentials;
     this.createLcuClient = dependencies.createLcuClient ?? ((credentials) => new RiotLcuClient(credentials));
@@ -846,9 +845,7 @@ export class AutoQueueService {
   }
 
   private async initializeLcuAndQueue(): Promise<void> {
-    const credentials = this.discoverCredentials({
-      leagueInstallPath: this.settings.leagueInstallPath
-    });
+    const credentials = this.discoverCredentials();
     this.lcu = this.createLcuClient(credentials);
 
     const queue = await this.resolveQueue();
@@ -918,7 +915,7 @@ export class AutoQueueService {
     this.consecutiveSearchFailures = 0;
     this.logger(reason);
 
-    const terminateResult = await this.terminateGameProcess(this.settings.leagueInstallPath);
+    const terminateResult = await this.terminateGameProcess();
     if (terminateResult === "terminated") {
       this.logger("Force-closed the League game process.");
     } else if (terminateResult === "not_found") {

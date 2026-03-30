@@ -110,7 +110,6 @@ const emptyState: ServiceSnapshot = {
 const emptySettings: AppSettings = {
   language: "zh-CN",
   queueId: null,
-  leagueInstallPath: null,
   autoCancelOnDisable: true,
   postGameDelayMinMs: 1000,
   postGameDelayMaxMs: 2000,
@@ -124,7 +123,6 @@ const emptySettings: AppSettings = {
 type SettingsFormState = {
   language: AppLanguage;
   queueId: string;
-  leagueInstallPath: string;
   autoCancelOnDisable: boolean;
   pollIntervalSeconds: string;
   postGameDelayMinSeconds: string;
@@ -158,7 +156,6 @@ const translations = {
      queueTockers: "发条鸟的试炼",
      fieldsLanguage: "界面语言",
      fieldsQueueId: "队列 ID",
-     fieldsLeagueInstallPath: "League 安装目录",
      fieldsPollInterval: "轮询间隔",
      fieldsPostGameDelayMin: "结算后最小延迟",
      fieldsPostGameDelayMax: "结算后最大延迟",
@@ -170,7 +167,6 @@ const translations = {
      generalSection: "基础设置",
      timingSection: "时序设置",
      recoverySection: "恢复设置",
-     leagueInstallPathPlaceholder: "留空时自动探测，例如 E:\\Riot Games\\League of Legends",
      queueIdError: "队列 ID 必须是正整数，或留空。",
      positiveNumberError: "请输入大于 0 的数字。",
     maxDelayError: "最大延迟必须大于或等于最小延迟。",
@@ -213,7 +209,6 @@ const translations = {
      queueTockers: "Tocker's Trials",
      fieldsLanguage: "Language",
      fieldsQueueId: "Queue ID",
-     fieldsLeagueInstallPath: "League Install Path",
      fieldsPollInterval: "Poll Interval",
      fieldsPostGameDelayMin: "Post-game Delay Min",
      fieldsPostGameDelayMax: "Post-game Delay Max",
@@ -225,7 +220,6 @@ const translations = {
      generalSection: "General",
      timingSection: "Timing",
      recoverySection: "Recovery",
-     leagueInstallPathPlaceholder: "Leave blank to auto-detect, for example E:\\Riot Games\\League of Legends",
      queueIdError: "Queue ID must be a positive integer or left blank.",
      positiveNumberError: "Enter a number greater than 0.",
     maxDelayError: "Max delay must be greater than or equal to min delay.",
@@ -263,7 +257,6 @@ function settingsToForm(settings: AppSettings): SettingsFormState {
   return {
     language: settings.language,
     queueId: settings.queueId === null ? "" : String(settings.queueId),
-    leagueInstallPath: settings.leagueInstallPath ?? "",
     autoCancelOnDisable: settings.autoCancelOnDisable,
     pollIntervalSeconds: formatSeconds(settings.pollIntervalMs),
     postGameDelayMinSeconds: formatSeconds(settings.postGameDelayMinMs),
@@ -364,7 +357,6 @@ function validateSettingsForm(
     payload: {
       language: form.language,
       queueId,
-      leagueInstallPath: form.leagueInstallPath.trim() === "" ? null : form.leagueInstallPath.trim(),
       autoCancelOnDisable: form.autoCancelOnDisable,
       pollIntervalMs: pollIntervalMs ?? undefined,
       postGameDelayMinMs: postGameDelayMinMs ?? undefined,
@@ -711,13 +703,6 @@ export function App() {
                       fullWidth
                     />
 
-                    <TextField
-                      label={t.fieldsLeagueInstallPath}
-                      value={settingsForm.leagueInstallPath}
-                      onChange={(event) => updateFormField("leagueInstallPath", event.target.value)}
-                      placeholder={t.leagueInstallPathPlaceholder}
-                      fullWidth
-                    />
                   </Box>
 
                   <Box sx={{ mt: 2 }}>
