@@ -23,7 +23,7 @@ function parseFromCommandLine(commandLine: string): LcuCredentials | null {
     return null;
   }
   const port = Number(portRaw);
-  if (!Number.isFinite(port)) {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
     return null;
   }
   return { port, token };
@@ -33,14 +33,19 @@ function parseFromLockfile(lockfilePath: string): LcuCredentials | null {
   if (!fs.existsSync(lockfilePath)) {
     return null;
   }
-  const content = fs.readFileSync(lockfilePath, "utf8").trim();
+  let content: string;
+  try {
+    content = fs.readFileSync(lockfilePath, "utf8").trim();
+  } catch {
+    return null;
+  }
   const parts = content.split(":");
   if (parts.length < 5) {
     return null;
   }
   const port = Number(parts[2]);
   const token = parts[3];
-  if (!Number.isFinite(port) || !token) {
+  if (!Number.isInteger(port) || port < 1 || port > 65535 || !token) {
     return null;
   }
   return { port, token };
@@ -73,12 +78,26 @@ export function discoverLcuCredentials(): LcuCredentials {
   const psCommand =
     "Get-CimInstance Win32_Process -Filter \"name='LeagueClientUx.exe'\" | Select-Object -ExpandProperty CommandLine";
 
-  const output = execFileSync("powershell.exe", ["-NoProfile", "-Command", psCommand], {
-    encoding: "utf8"
-  }).trim();
+  let output = "";
+  try {
+    output = execFileSync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", psCommand],
+      {
+        encoding: "utf8",
+        windowsHide: true,
+        timeout: 5000,
+      },
+    ).trim();
+  } catch {
+    // A restricted process query must not prevent the lockfile fallback.
+  }
 
   if (output) {
-    for (const line of output.split(/\r?\n/).map((x) => x.trim()).filter(Boolean)) {
+    for (const line of output
+      .split(/\r?\n/)
+      .map((x) => x.trim())
+      .filter(Boolean)) {
       const creds = parseFromCommandLine(line);
       if (creds) {
         return creds;
@@ -93,5 +112,7 @@ export function discoverLcuCredentials(): LcuCredentials {
     }
   }
 
-  throw new Error("Unable to discover LCU credentials. Start League client first.");
+  throw new Error(
+    "Unable to discover LCU credentials. Start League client first.",
+  );
 }

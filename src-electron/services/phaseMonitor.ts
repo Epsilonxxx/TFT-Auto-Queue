@@ -1,4 +1,5 @@
 import type { GameflowPhase } from "../lcu/client";
+import { isGameflowPhase } from "../lcu/client";
 
 type IntervalHandle = ReturnType<typeof setInterval>;
 
@@ -23,12 +24,20 @@ export type PhaseMonitorOptions = {
 
 export class PhaseMonitor {
   private running = false;
+  private polling = false;
+  private generation = 0;
+  private eventRevision = 0;
   private pollTimer: IntervalHandle | null = null;
   private pollIntervalMs: number;
   private readonly client: PhaseMonitorClient;
-  private readonly onPhase: (observation: PhaseObservation) => Promise<void> | void;
+  private readonly onPhase: (
+    observation: PhaseObservation,
+  ) => Promise<void> | void;
   private readonly onPollError?: (error: unknown) => Promise<void> | void;
-  private readonly setIntervalFn: (callback: () => void, delay: number) => IntervalHandle;
+  private readonly setIntervalFn: (
+    callback: () => void,
+    delay: number,
+  ) => IntervalHandle;
   private readonly clearIntervalFn: (handle: IntervalHandle) => void;
 
   constructor(options: PhaseMonitorOptions) {
@@ -46,18 +55,30 @@ export class PhaseMonitor {
     }
 
     this.running = true;
+    this.generation += 1;
     this.client.connectGameflowEvents((phase) => {
       if (!this.running) {
         return;
       }
-      void this.onPhase({ phase, source: "event" });
+      this.eventRevision += 1;
+      const generation = this.generation;
+      void Promise.resolve()
+        .then(() => {
+          if (this.running && generation === this.generation)
+            return this.onPhase({ phase, source: "event" });
+        })
+        .catch((error) => {
+          if (this.running)
+            void Promise.resolve(this.onPollError?.(error)).catch(() => {});
+        });
     });
     this.restartPolling();
   }
 
   stop(): void {
     this.running = false;
-    if (this.pollTimer) {
+    this.generation += 1;
+    if (this.pollTimer !== null) {
       this.clearIntervalFn(this.pollTimer);
       this.pollTimer = null;
     }
@@ -71,20 +92,36 @@ export class PhaseMonitor {
   }
 
   async tickOnce(): Promise<void> {
-    if (!this.running) {
+    if (!this.running || this.polling) {
       return;
     }
 
+    this.polling = true;
+    const generation = this.generation;
+    const eventRevision = this.eventRevision;
     try {
-      const phase = await this.client.get<GameflowPhase>("/lol-gameflow/v1/gameflow-phase");
+      const phase = await this.client.get<GameflowPhase>(
+        "/lol-gameflow/v1/gameflow-phase",
+      );
+      if (
+        !this.running ||
+        generation !== this.generation ||
+        eventRevision !== this.eventRevision
+      )
+        return;
+      if (!isGameflowPhase(phase))
+        throw new Error("Invalid gameflow phase received from client.");
       await this.onPhase({ phase, source: "poll" });
     } catch (error) {
-      await this.onPollError?.(error);
+      if (this.running && generation === this.generation)
+        await this.onPollError?.(error);
+    } finally {
+      this.polling = false;
     }
   }
 
   private restartPolling(): void {
-    if (this.pollTimer) {
+    if (this.pollTimer !== null) {
       this.clearIntervalFn(this.pollTimer);
       this.pollTimer = null;
     }

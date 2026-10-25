@@ -1,5 +1,9 @@
 import type { GameflowPhase } from "../lcu/client";
-import { applyPhaseTransition, type PhaseTrackingState, type PhaseTransitionResult } from "./phaseState";
+import {
+  applyPhaseTransition,
+  type PhaseTrackingState,
+  type PhaseTransitionResult,
+} from "./phaseState";
 
 export type QueueFlowStateName = "Idle" | "Lobby" | "InGame" | "PostGame";
 
@@ -39,19 +43,30 @@ export class QueueSessionState {
   private noGameStartedAt: number | null = null;
   private flowState: QueueFlowStateName = "Idle";
 
-  constructor(initialStats: { totalCycleCount: number; sessionCycleCount: number }) {
+  constructor(initialStats: {
+    totalCycleCount: number;
+    sessionCycleCount: number;
+  }) {
     this.tracking = {
       lastPhase: null,
       lastPostGameActionAt: 0,
       inCurrentMatch: false,
       totalCycleCount: initialStats.totalCycleCount,
       sessionCycleCount: initialStats.sessionCycleCount,
-      pendingPostGameSearchDelay: false
+      pendingPostGameSearchDelay: false,
     };
   }
 
   get phase(): GameflowPhase | null {
     return this.tracking.lastPhase;
+  }
+
+  get phaseStartedAt(): number | null {
+    return this.currentPhaseStartedAt;
+  }
+
+  get matchStartedAt(): number | null {
+    return this.activeCycleStartedAt;
   }
 
   get totalCycleCount(): number {
@@ -73,11 +88,14 @@ export class QueueSessionState {
   getStats(): { totalCycleCount: number; sessionCycleCount: number } {
     return {
       totalCycleCount: this.tracking.totalCycleCount,
-      sessionCycleCount: this.tracking.sessionCycleCount
+      sessionCycleCount: this.tracking.sessionCycleCount,
     };
   }
 
-  restoreStats(stats: { totalCycleCount: number; sessionCycleCount: number }): void {
+  restoreStats(stats: {
+    totalCycleCount: number;
+    sessionCycleCount: number;
+  }): void {
     this.tracking.totalCycleCount = stats.totalCycleCount;
     this.tracking.sessionCycleCount = stats.sessionCycleCount;
   }
@@ -134,7 +152,11 @@ export class QueueSessionState {
     return transition;
   }
 
-  blockSearch(now: number, durationMs: number, options: { stayOnHome?: boolean } = {}): void {
+  blockSearch(
+    now: number,
+    durationMs: number,
+    options: { stayOnHome?: boolean } = {},
+  ): void {
     this.searchBlockedUntil = now + durationMs;
     this.lastBlockedLogAt = 0;
     if (options.stayOnHome) {
@@ -196,7 +218,10 @@ export class QueueSessionState {
     return now - this.lastReconnectAt >= cooldownMs;
   }
 
-  markReconnect(now: number, options: { resetCycleTimer?: boolean } = {}): void {
+  markReconnect(
+    now: number,
+    options: { resetCycleTimer?: boolean } = {},
+  ): void {
     this.lastReconnectAt = now;
     if (options.resetCycleTimer) {
       this.activeCycleStartedAt = now;
@@ -212,14 +237,20 @@ export class QueueSessionState {
   }
 
   shouldReturnToLobbyFromReconnect(now: number, thresholdMs: number): boolean {
-    if (this.tracking.lastPhase !== "Reconnect" || this.reconnectPhaseStartedAt === null) {
+    if (
+      this.tracking.lastPhase !== "Reconnect" ||
+      this.reconnectPhaseStartedAt === null
+    ) {
       return false;
     }
 
     return now - this.reconnectPhaseStartedAt >= thresholdMs;
   }
 
-  shouldReturnToLobbyForGameEntryTimeout(now: number, thresholdMs: number): boolean {
+  shouldReturnToLobbyForGameEntryTimeout(
+    now: number,
+    thresholdMs: number,
+  ): boolean {
     if (this.noGameStartedAt === null) {
       return false;
     }
@@ -232,14 +263,25 @@ export class QueueSessionState {
   }
 
   private updateCycleWindow(phase: GameflowPhase, now: number): void {
-    if (isTrackedCyclePhase(phase)) {
+    if (
+      phase === "InProgress" ||
+      phase === "Reconnect" ||
+      phase === "TerminatedInError"
+    ) {
       if (this.activeCycleStartedAt === null) {
         this.activeCycleStartedAt = now;
       }
       return;
     }
 
-    this.activeCycleStartedAt = null;
+    if (
+      !isTrackedCyclePhase(phase) ||
+      phase === "WaitingForStats" ||
+      phase === "PreEndOfGame" ||
+      phase === "EndOfGame"
+    ) {
+      this.activeCycleStartedAt = null;
+    }
   }
 
   private updateReconnectWindow(phase: GameflowPhase, now: number): void {

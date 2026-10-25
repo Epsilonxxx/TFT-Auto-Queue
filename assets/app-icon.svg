@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <rect x="8" y="8" width="240" height="240" rx="65" fill="#245d49"/>
+  <text x="35" y="174" font-family="Segoe UI, sans-serif" font-size="150" font-weight="600" letter-spacing="-14" fill="#ffffff">a<tspan fill="#d8eb91">q</tspan></text>
+  <circle cx="226" cy="29" r="21" fill="#d8eb91" stroke="#f6f6f2" stroke-width="8"/>
+</svg>

@@ -5,15 +5,25 @@ import type { AppSettings } from "./config/appConfig";
 type InitialData = {
   state: ServiceSnapshot;
   settings: AppSettings;
+  defaults: AppSettings;
+  version: string;
 };
 
 contextBridge.exposeInMainWorld("tftApi", {
   toggle: () => ipcRenderer.invoke("toggle"),
-  getInitialData: () => ipcRenderer.invoke("initial-data") as Promise<InitialData>,
-  saveSettings: (settings: Partial<AppSettings>) => ipcRenderer.invoke("save-settings", settings) as Promise<AppSettings>,
+  getInitialData: () =>
+    ipcRenderer.invoke("initial-data") as Promise<InitialData>,
+  checkClient: () =>
+    ipcRenderer.invoke("check-client") as Promise<{
+      ok: boolean;
+      message: string;
+    }>,
+  saveSettings: (settings: Partial<AppSettings>) =>
+    ipcRenderer.invoke("save-settings", settings) as Promise<AppSettings>,
   onState: (listener: (state: ServiceSnapshot) => void) => {
-    const handler = (_event: unknown, state: ServiceSnapshot) => listener(state);
+    const handler = (_event: unknown, state: ServiceSnapshot) =>
+      listener(state);
     ipcRenderer.on("state", handler);
     return () => ipcRenderer.removeListener("state", handler);
-  }
+  },
 });

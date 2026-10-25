@@ -1,11 +1,14 @@
 import path from "node:path";
 import dotenv from "dotenv";
-import { app, globalShortcut } from "electron";
+import { app, dialog, globalShortcut } from "electron";
 import { registerIpcHandlers } from "./app/registerIpc";
 import { TrayController } from "./app/trayController";
 import { WindowManager } from "./app/windowManager";
 import type { AppSettings } from "./config/appConfig";
-import type { AutoQueueService, ServiceSnapshot } from "./services/autoQueueService";
+import type {
+  AutoQueueService,
+  ServiceSnapshot,
+} from "./services/autoQueueService";
 import { log } from "./utils/logger";
 
 dotenv.config();
@@ -21,6 +24,8 @@ let trayController: TrayController | null = null;
 let windowManager: WindowManager | null = null;
 let disposeIpc: (() => void) | null = null;
 let disposeStateSubscription: (() => void) | null = null;
+let togglePromise: Promise<ServiceSnapshot> | null = null;
+let shutdownComplete = false;
 
 function getService(): AutoQueueService {
   if (!service) {
@@ -35,6 +40,16 @@ function syncShellState(snapshot: ServiceSnapshot): void {
 }
 
 async function toggleService(): Promise<ServiceSnapshot> {
+  if (togglePromise) return togglePromise;
+  togglePromise = performToggle();
+  try {
+    return await togglePromise;
+  } finally {
+    togglePromise = null;
+  }
+}
+
+async function performToggle(): Promise<ServiceSnapshot> {
   const currentService = getService();
 
   try {
@@ -61,23 +76,27 @@ function registerHotkey(): void {
 async function bootstrap(): Promise<void> {
   app.setAppUserModelId("tft-auto-queue-next");
 
-  const [{ JsonConfigStore, createDefaultAppConfig, resolveConfigFilePath }, { AutoQueueService }] = await Promise.all([
+  const [
+    { JsonConfigStore, createDefaultAppConfig, resolveConfigFilePath },
+    { AutoQueueService },
+  ] = await Promise.all([
     import("./config/appConfig"),
-    import("./services/autoQueueService")
+    import("./services/autoQueueService"),
   ]);
 
   const configStore = new JsonConfigStore(
     resolveConfigFilePath(app.getPath("userData")),
-    createDefaultAppConfig(process.env)
+    createDefaultAppConfig(process.env),
   );
 
   service = new AutoQueueService({ configStore });
   windowManager = new WindowManager({
     preloadPath: path.join(__dirname, "preload.js"),
     indexPath: path.join(__dirname, "..", "dist-renderer", "index.html"),
-    shouldHideOnClose: () => !quitting
+    shouldHideOnClose: () => !quitting,
   });
   trayController = new TrayController({
+    getLanguage: () => getService().getSettings().language,
     onToggle: () => {
       void toggleService();
     },
@@ -87,38 +106,78 @@ async function bootstrap(): Promise<void> {
     onExit: () => {
       quitting = true;
       app.quit();
-    }
+    },
   });
 
   windowManager.create();
   trayController.create();
   disposeIpc = registerIpcHandlers({
+    trustedWebContentsId: () => windowManager?.getWindow()?.webContents.id,
+    checkClient: async () => {
+      const [{ discoverLcuCredentials }, { LcuClient }] = await Promise.all([
+        import("./lcu/discovery"),
+        import("./lcu/client"),
+      ]);
+      let client: InstanceType<typeof LcuClient> | null = null;
+      try {
+        client = new LcuClient(discoverLcuCredentials());
+        await client.get("/lol-gameflow/v1/gameflow-phase");
+        return { ok: true, message: "Client connected" };
+      } catch {
+        return {
+          ok: false,
+          message:
+            "Unable to connect. Open the League client and sign in first.",
+        };
+      } finally {
+        client?.close();
+      }
+    },
     onToggle: toggleService,
     getInitialData: () => ({
       state: getService().getSnapshot(),
-      settings: getService().getSettings()
+      settings: getService().getSettings(),
+      defaults: createDefaultAppConfig({}).settings,
+      version: app.getVersion(),
     }),
-    saveSettings
+    saveSettings,
   });
   disposeStateSubscription = service.subscribe(syncShellState);
   registerHotkey();
 }
 
 app.whenReady().then(() => {
-  void bootstrap();
+  if (!gotSingleInstanceLock) return;
+  void bootstrap().catch((error) => {
+    dialog.showErrorBox("TFT Auto Queue", `Unable to start: ${String(error)}`);
+    quitting = true;
+    app.quit();
+  });
 });
 
 app.on("second-instance", () => {
   windowManager?.focusExisting();
 });
 
-app.on("will-quit", async () => {
+app.on("before-quit", (event) => {
+  quitting = true;
+  if (shutdownComplete || !service) return;
+  event.preventDefault();
+  void service
+    .stop()
+    .catch((error) => log(`Stop failed: ${String(error)}`))
+    .finally(() => {
+      shutdownComplete = true;
+      app.quit();
+    });
+});
+
+app.on("will-quit", () => {
   quitting = true;
   globalShortcut.unregisterAll();
   disposeIpc?.();
   disposeStateSubscription?.();
   trayController?.destroy();
-  await service?.stop();
 });
 
 app.on("window-all-closed", () => {

@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { GameflowPhase } from "../lcu/client";
-import { PhaseMonitor, type PhaseMonitorClient, type PhaseObservation } from "./phaseMonitor";
+import {
+  PhaseMonitor,
+  type PhaseMonitorClient,
+  type PhaseObservation,
+} from "./phaseMonitor";
 
 class FakePhaseMonitorClient implements PhaseMonitorClient {
   phase: GameflowPhase = "Lobby";
@@ -25,6 +29,57 @@ class FakePhaseMonitorClient implements PhaseMonitorClient {
 }
 
 describe("PhaseMonitor", () => {
+  it("does not overlap polls or deliver a stale poll after stopping", async () => {
+    let resolve!: (phase: GameflowPhase) => void;
+    const get = vi.fn(
+      () =>
+        new Promise<GameflowPhase>((done) => {
+          resolve = done;
+        }),
+    );
+    const onPhase = vi.fn();
+    const monitor = new PhaseMonitor({
+      client: { get: get as never, connectGameflowEvents() {} },
+      pollIntervalMs: 1000,
+      onPhase,
+      setIntervalFn: () => 0 as never,
+      clearIntervalFn: () => {},
+    });
+    monitor.start();
+    const pending = monitor.tickOnce();
+    await monitor.tickOnce();
+    expect(get).toHaveBeenCalledTimes(1);
+    monitor.stop();
+    resolve("Lobby");
+    await pending;
+    expect(onPhase).not.toHaveBeenCalled();
+  });
+
+  it("discards an older poll when a newer phase event arrives", async () => {
+    let resolve!: (phase: GameflowPhase) => void;
+    const client = new FakePhaseMonitorClient();
+    client.get = () =>
+      new Promise((done) => {
+        resolve = done as never;
+      });
+    const onPhase = vi.fn();
+    const monitor = new PhaseMonitor({
+      client,
+      pollIntervalMs: 1000,
+      onPhase,
+      setIntervalFn: () => 0 as never,
+      clearIntervalFn: () => {},
+    });
+    monitor.start();
+    const pending = monitor.tickOnce();
+    client.emitPhase("ReadyCheck");
+    resolve("Lobby");
+    await pending;
+    expect(onPhase.mock.calls.map(([value]) => value.phase)).toEqual([
+      "ReadyCheck",
+    ]);
+    monitor.stop();
+  });
   it("forwards both event-driven and polled phase observations", async () => {
     const client = new FakePhaseMonitorClient();
     const observations: PhaseObservation[] = [];
@@ -35,8 +90,8 @@ describe("PhaseMonitor", () => {
       onPhase: (observation) => {
         observations.push(observation);
       },
-      setIntervalFn: (() => 0 as ReturnType<typeof setInterval>),
-      clearIntervalFn: () => {}
+      setIntervalFn: () => 0 as ReturnType<typeof setInterval>,
+      clearIntervalFn: () => {},
     });
 
     monitor.start();
@@ -46,7 +101,7 @@ describe("PhaseMonitor", () => {
 
     expect(observations).toEqual([
       { phase: "ReadyCheck", source: "event" },
-      { phase: "ReadyCheck", source: "poll" }
+      { phase: "ReadyCheck", source: "poll" },
     ]);
   });
 
@@ -58,7 +113,7 @@ describe("PhaseMonitor", () => {
       },
       connectGameflowEvents() {
         // no-op
-      }
+      },
     };
 
     const monitor = new PhaseMonitor({
@@ -68,8 +123,8 @@ describe("PhaseMonitor", () => {
       onPollError: (error) => {
         errors.push(error);
       },
-      setIntervalFn: (() => 0 as ReturnType<typeof setInterval>),
-      clearIntervalFn: () => {}
+      setIntervalFn: () => 0 as ReturnType<typeof setInterval>,
+      clearIntervalFn: () => {},
     });
 
     monitor.start();

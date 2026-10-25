@@ -1,4 +1,5 @@
 import { BrowserWindow } from "electron";
+import path from "node:path";
 import type { ServiceSnapshot } from "../services/autoQueueService";
 
 export type WindowManagerOptions = {
@@ -18,20 +19,29 @@ export class WindowManager {
     }
 
     this.window = new BrowserWindow({
-      width: 1040,
-      height: 560,
+      width: 1180,
+      height: 820,
       minWidth: 360,
       minHeight: 420,
       autoHideMenuBar: true,
-      backgroundColor: "#f6f8fb",
+      backgroundColor: "#f6f6f2",
+      icon: path.join(__dirname, "..", "..", "assets", "app-icon.png"),
       webPreferences: {
         preload: this.options.preloadPath,
         contextIsolation: true,
-        nodeIntegration: false
-      }
+        sandbox: true,
+        nodeIntegration: false,
+      },
     });
 
     void this.window.loadFile(this.options.indexPath);
+    this.window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+    this.window.webContents.on("will-navigate", (event) =>
+      event.preventDefault(),
+    );
+    this.window.on("closed", () => {
+      this.window = null;
+    });
     this.window.on("close", (event) => {
       if (!this.options.shouldHideOnClose()) {
         return;
@@ -48,8 +58,7 @@ export class WindowManager {
   }
 
   show(): void {
-    this.window?.show();
-    this.window?.focus();
+    this.focusExisting();
   }
 
   focusExisting(): void {
@@ -64,6 +73,7 @@ export class WindowManager {
   }
 
   broadcastState(snapshot: ServiceSnapshot): void {
-    this.window?.webContents.send("state", snapshot);
+    if (this.window && !this.window.isDestroyed())
+      this.window.webContents.send("state", snapshot);
   }
 }

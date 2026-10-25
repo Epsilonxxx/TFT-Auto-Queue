@@ -29,7 +29,8 @@ export class LcuClient {
       baseURL: `https://127.0.0.1:${credentials.port}`,
       httpsAgent,
       auth: { username: "riot", password: credentials.token },
-      timeout: 8000
+      proxy: false,
+      timeout: 8000,
     });
   }
 
@@ -49,25 +50,44 @@ export class LcuClient {
   }
 
   connectGameflowEvents(onPhase: (phase: GameflowPhase) => void): void {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+    if (
+      this.ws &&
+      (this.ws.readyState === WebSocket.OPEN ||
+        this.ws.readyState === WebSocket.CONNECTING)
+    ) {
       return;
     }
-    const authToken = Buffer.from(`riot:${this.credentials.token}`).toString("base64");
-    this.ws = new WebSocket(`wss://127.0.0.1:${this.credentials.port}/`, {
+    const authToken = Buffer.from(`riot:${this.credentials.token}`).toString(
+      "base64",
+    );
+    const socket = new WebSocket(`wss://127.0.0.1:${this.credentials.port}/`, {
       rejectUnauthorized: false,
-      headers: { Authorization: `Basic ${authToken}` }
+      handshakeTimeout: 8000,
+      headers: { Authorization: `Basic ${authToken}` },
     });
-    this.ws.on("open", () => {
-      this.ws?.send(JSON.stringify([5, "OnJsonApiEvent_lol-gameflow_v1_gameflow-phase"]));
+    this.ws = socket;
+    socket.on("error", () => {
+      // HTTP polling continues while the event socket is unavailable.
     });
-    this.ws.on("message", (raw) => {
+    socket.on("close", () => {
+      if (this.ws === socket) this.ws = null;
+    });
+    socket.on("open", () => {
+      socket.send(
+        JSON.stringify([5, "OnJsonApiEvent_lol-gameflow_v1_gameflow-phase"]),
+      );
+    });
+    socket.on("message", (raw) => {
       try {
         const payload = JSON.parse(raw.toString());
         if (!Array.isArray(payload) || payload.length < 3) {
           return;
         }
-        const phase = payload[2]?.data as GameflowPhase | undefined;
-        if (typeof phase === "string") {
+        const phase = payload[2]?.data;
+        if (
+          payload[2]?.uri === "/lol-gameflow/v1/gameflow-phase" &&
+          isGameflowPhase(phase)
+        ) {
           onPhase(phase);
         }
       } catch {
@@ -77,7 +97,26 @@ export class LcuClient {
   }
 
   close(): void {
-    this.ws?.close();
+    this.ws?.terminate();
     this.ws = null;
   }
+}
+
+export function isGameflowPhase(value: unknown): value is GameflowPhase {
+  return (
+    typeof value === "string" &&
+    [
+      "None",
+      "Lobby",
+      "Matchmaking",
+      "ReadyCheck",
+      "ChampSelect",
+      "InProgress",
+      "WaitingForStats",
+      "PreEndOfGame",
+      "EndOfGame",
+      "Reconnect",
+      "TerminatedInError",
+    ].includes(value)
+  );
 }

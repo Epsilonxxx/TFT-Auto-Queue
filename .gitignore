@@ -4,3 +4,4 @@ dist-renderer/
 release/
 release-*/
 .env
+artifacts/

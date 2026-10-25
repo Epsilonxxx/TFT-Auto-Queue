@@ -89,6 +89,12 @@ public static class Win32Recovery {
   [DllImport("user32.dll")]
   public static extern bool IsWindowVisible(IntPtr hWnd);
 
+  [DllImport("user32.dll")]
+  public static extern bool IsWindowEnabled(IntPtr hWnd);
+
+  [DllImport("user32.dll")]
+  public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
   [DllImport("user32.dll", CharSet = CharSet.Unicode)]
   public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
 
@@ -183,6 +189,14 @@ function Find-MatchedWindow() {
       return $true
     }
 
+    if ((Get-ClassNameValue $hWnd) -ne '#32770') { return $true }
+    [uint32]$ownerProcessId = 0
+    [void][Win32Recovery]::GetWindowThreadProcessId($hWnd, [ref]$ownerProcessId)
+    $owner = Get-Process -Id $ownerProcessId -ErrorAction SilentlyContinue
+    if ($null -eq $owner -or $owner.ProcessName -notmatch '^(League of Legends|LeagueClient|LeagueClientUx|LeagueCrashHandler64|BugSplat|BsSndRpt)$') {
+      return $true
+    }
+
     $title = Get-WindowTextValue $hWnd 512
     if ([string]::IsNullOrWhiteSpace($title)) {
       return $true
@@ -202,13 +216,13 @@ function Find-MatchedWindow() {
         [void]$texts.Add($text)
       }
 
-      if ($className -eq 'Button') {
+      if ($className -eq 'Button' -and [Win32Recovery]::IsWindowEnabled($child)) {
         $rect = New-Object Win32Recovery+RECT
         if ([Win32Recovery]::GetWindowRect($child, [ref]$rect)) {
           [void]$buttons.Add([pscustomobject]@{
             Handle = $child
             Left = $rect.Left
-            Text = ($text ?? '').Trim()
+            Text = ([string]$text).Trim()
           })
         }
       }
@@ -218,7 +232,7 @@ function Find-MatchedWindow() {
 
     $joinedText = ($texts -join ' ')
     $likelyCrashDialog =
-      (Contains-Pattern $title $windowPatterns) -or
+      (Contains-Pattern $title $windowPatterns) -and
       (Contains-Pattern $joinedText $textPatterns)
 
     if (-not $likelyCrashDialog) {
@@ -269,8 +283,11 @@ $lastHandledAt = $startedAt
 $watchUntil = $startedAt.AddMilliseconds($initialWaitMs)
 $handledCount = 0
 $reportedCount = 0
+$reportCompleted = $false
+$handledDialogs = @{}
+$deadline = $startedAt.AddMilliseconds($watchAfterReportStartMs + 10000)
 
-while ($true) {
+while ([DateTime]::UtcNow -lt $deadline) {
   $matchedWindow = Find-MatchedWindow
   $now = [DateTime]::UtcNow
 
@@ -298,13 +315,20 @@ while ($true) {
     break
   }
 
+  $dialogKey = ([string]$matchedWindow.Handle) + ':' + $matchedWindow.Text
+  if ($handledDialogs.ContainsKey($dialogKey)) {
+    Start-Sleep -Milliseconds $pollIntervalMs
+    continue
+  }
+
   [Win32Recovery]::ShowWindow($matchedWindow.Handle, 5) | Out-Null
   [Win32Recovery]::SetForegroundWindow($matchedWindow.Handle) | Out-Null
   Start-Sleep -Milliseconds 120
 
   $selection = Select-TargetButton $matchedWindow
   if ($null -ne $selection) {
-    [Win32Recovery]::SendMessage($selection.Button.Handle, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+    [Win32Recovery]::PostMessage($selection.Button.Handle, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+    $handledDialogs[$dialogKey] = $true
     $handledCount += 1
     $lastHandledAt = [DateTime]::UtcNow
 
@@ -315,6 +339,7 @@ while ($true) {
     if ($matchedWindow.Kind -eq 'report_start') {
       $watchUntil = [DateTime]::UtcNow.AddMilliseconds($watchAfterReportStartMs)
     } elseif ($matchedWindow.Kind -eq 'report_complete') {
+      $reportCompleted = $true
       $watchUntil = [DateTime]::UtcNow.AddMilliseconds($idleExitMs)
     } else {
       $watchUntil = [DateTime]::UtcNow.AddMilliseconds([Math]::Max($idleExitMs, $pollIntervalMs))
@@ -325,13 +350,14 @@ while ($true) {
   }
 
   [Win32Recovery]::PostMessage($matchedWindow.Handle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+  $handledDialogs[$dialogKey] = $true
   $handledCount += 1
   $lastHandledAt = [DateTime]::UtcNow
   $watchUntil = [DateTime]::UtcNow.AddMilliseconds($idleExitMs)
   Start-Sleep -Milliseconds 500
 }
 
-if ($reportedCount -gt 0) {
+if ($reportCompleted) {
   Write-Output 'reported'
   exit 0
 }
@@ -349,7 +375,8 @@ export type SystemErrorRecoveryDependencies = {
   platform?: NodeJS.Platform;
 };
 
-export type DismissCrashDialogResult = "reported" | "dismissed" | "closed" | "not_found" | "not_match" | "error";
+export type DismissCrashDialogResult =
+  "reported" | "dismissed" | "closed" | "not_found" | "not_match" | "error";
 
 export class SystemErrorRecovery {
   private readonly execFileImpl: typeof execFileAsync;
@@ -360,7 +387,9 @@ export class SystemErrorRecovery {
     this.platform = dependencies.platform ?? process.platform;
   }
 
-  async dismissLeagueCrashDialog(): Promise<DismissCrashDialogResult> {
+  async dismissLeagueCrashDialog(
+    signal?: AbortSignal,
+  ): Promise<DismissCrashDialogResult> {
     if (this.platform !== "win32") {
       return "not_found";
     }
@@ -368,11 +397,22 @@ export class SystemErrorRecovery {
     try {
       const { stdout } = await this.execFileImpl(
         "powershell.exe",
-        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", POWER_SHELL_CRASH_DIALOG_SCRIPT],
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-EncodedCommand",
+          Buffer.from(POWER_SHELL_CRASH_DIALOG_SCRIPT, "utf16le").toString(
+            "base64",
+          ),
+        ],
         {
           encoding: "utf8",
-          windowsHide: true
-        }
+          windowsHide: true,
+          signal,
+          timeout: 380000,
+        },
       );
 
       const result = stdout.trim().toLowerCase();

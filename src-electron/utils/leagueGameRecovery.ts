@@ -59,10 +59,16 @@ if ($matched.Count -eq 0) {
 }
 
 foreach ($process in $matched) {
-  Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+  Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
 }
 
 Start-Sleep -Milliseconds 400
+foreach ($process in $matched) {
+  if (Get-Process -Id $process.ProcessId -ErrorAction SilentlyContinue) {
+    Write-Output 'error'
+    exit 1
+  }
+}
 Write-Output 'terminated'
 `.trim();
 
@@ -82,7 +88,9 @@ export class LeagueGameRecovery {
     this.platform = dependencies.platform ?? process.platform;
   }
 
-  async terminateLeagueGameProcess(leagueInstallPath?: string | null): Promise<TerminateGameProcessResult> {
+  async terminateLeagueGameProcess(
+    leagueInstallPath?: string | null,
+  ): Promise<TerminateGameProcessResult> {
     if (this.platform !== "win32") {
       return "not_found";
     }
@@ -96,16 +104,17 @@ export class LeagueGameRecovery {
           "-ExecutionPolicy",
           "Bypass",
           "-Command",
-          POWER_SHELL_FORCE_QUIT_GAME_SCRIPT
+          POWER_SHELL_FORCE_QUIT_GAME_SCRIPT,
         ],
         {
           encoding: "utf8",
           windowsHide: true,
+          timeout: 10000,
           env: {
             ...process.env,
-            TFT_LEAGUE_INSTALL_PATH: leagueInstallPath?.trim() ?? ""
-          }
-        }
+            TFT_LEAGUE_INSTALL_PATH: leagueInstallPath?.trim() ?? "",
+          },
+        },
       );
 
       const result = stdout.trim().toLowerCase();

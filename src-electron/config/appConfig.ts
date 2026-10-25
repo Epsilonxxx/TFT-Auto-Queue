@@ -30,7 +30,9 @@ export type PersistedAppConfig = {
 export interface AppConfigStore {
   get(): PersistedAppConfig;
   set(next: PersistedAppConfig): PersistedAppConfig;
-  update(updater: (current: PersistedAppConfig) => PersistedAppConfig): PersistedAppConfig;
+  update(
+    updater: (current: PersistedAppConfig) => PersistedAppConfig,
+  ): PersistedAppConfig;
 }
 
 const CONFIG_VERSION = 1;
@@ -43,57 +45,94 @@ function readOptionalNumber(raw: string | undefined): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function readOptionalPositive(raw: string | undefined, fallback: number): number {
+function readOptionalPositive(
+  raw: string | undefined,
+  fallback: number,
+): number {
   const parsed = readOptionalNumber(raw);
   return parsed !== null && parsed > 0 ? parsed : fallback;
+}
+
+function validDuration(value: unknown, fallback: number, minimum = 1): number {
+  return typeof value === "number" &&
+    Number.isFinite(value) &&
+    value >= minimum &&
+    value <= 86400000
+    ? Math.round(value)
+    : fallback;
 }
 
 function cloneConfig(config: PersistedAppConfig): PersistedAppConfig {
   return {
     version: config.version,
     settings: { ...config.settings },
-    stats: { ...config.stats }
+    stats: { ...config.stats },
   };
 }
 
-export function createDefaultAppConfig(env: NodeJS.ProcessEnv = process.env): PersistedAppConfig {
+export function createDefaultAppConfig(
+  env: NodeJS.ProcessEnv = process.env,
+): PersistedAppConfig {
   const queueId = readOptionalNumber(env.TFT_QUEUE_ID);
-  const postGameDelayMinMs = readOptionalPositive(env.POST_GAME_DELAY_MIN_MS, 1000);
-  const postGameDelayMaxMs = readOptionalPositive(env.POST_GAME_DELAY_MAX_MS, 2000);
+  const postGameDelayMinMs = readOptionalPositive(
+    env.POST_GAME_DELAY_MIN_MS,
+    1000,
+  );
+  const postGameDelayMaxMs = readOptionalPositive(
+    env.POST_GAME_DELAY_MAX_MS,
+    2000,
+  );
 
   return {
     version: CONFIG_VERSION,
     settings: {
       language: env.APP_LANGUAGE === "en-US" ? "en-US" : "zh-CN",
       queueId,
-      autoCancelOnDisable: (env.AUTO_CANCEL_ON_DISABLE ?? "true").toLowerCase() === "true",
+      autoCancelOnDisable:
+        (env.AUTO_CANCEL_ON_DISABLE ?? "true").toLowerCase() === "true",
       postGameDelayMinMs: Math.min(postGameDelayMinMs, postGameDelayMaxMs),
       postGameDelayMaxMs: Math.max(postGameDelayMinMs, postGameDelayMaxMs),
-      queueRetryBlockMs: readOptionalPositive(env.QUEUE_RETRY_BLOCK_MS, 3 * 60 * 1000),
-      homeResetCooldownMs: readOptionalPositive(env.HOME_RESET_COOLDOWN_MS, 10 * 1000),
-      reconnectCooldownMs: readOptionalPositive(env.RECONNECT_COOLDOWN_MS, 5000),
-      cycleReconnectTimeoutMs: readOptionalPositive(env.CYCLE_RECONNECT_TIMEOUT_MS, 5 * 60 * 1000),
-      pollIntervalMs: readOptionalPositive(env.POLL_INTERVAL_MS, 2500)
+      queueRetryBlockMs: readOptionalPositive(
+        env.QUEUE_RETRY_BLOCK_MS,
+        3 * 60 * 1000,
+      ),
+      homeResetCooldownMs: readOptionalPositive(
+        env.HOME_RESET_COOLDOWN_MS,
+        10 * 1000,
+      ),
+      reconnectCooldownMs: readOptionalPositive(
+        env.RECONNECT_COOLDOWN_MS,
+        5000,
+      ),
+      cycleReconnectTimeoutMs: readOptionalPositive(
+        env.CYCLE_RECONNECT_TIMEOUT_MS,
+        5 * 60 * 1000,
+      ),
+      pollIntervalMs: readOptionalPositive(env.POLL_INTERVAL_MS, 2500),
     },
     stats: {
       totalCycleCount: 0,
-      sessionCycleCount: 0
-    }
+      sessionCycleCount: 0,
+    },
   };
 }
 
 export function normalizeAppConfig(
   raw: Partial<PersistedAppConfig> | undefined,
-  defaults: PersistedAppConfig
+  defaults: PersistedAppConfig,
 ): PersistedAppConfig {
   const safeRaw = raw ?? {};
   const settings: Partial<AppSettings> = safeRaw.settings ?? {};
   const stats: Partial<AppStats> = safeRaw.stats ?? {};
 
-  const minDelay =
-    typeof settings.postGameDelayMinMs === "number" ? settings.postGameDelayMinMs : defaults.settings.postGameDelayMinMs;
-  const maxDelay =
-    typeof settings.postGameDelayMaxMs === "number" ? settings.postGameDelayMaxMs : defaults.settings.postGameDelayMaxMs;
+  const minDelay = validDuration(
+    settings.postGameDelayMinMs,
+    defaults.settings.postGameDelayMinMs,
+  );
+  const maxDelay = validDuration(
+    settings.postGameDelayMaxMs,
+    defaults.settings.postGameDelayMaxMs,
+  );
 
   return {
     version: CONFIG_VERSION,
@@ -105,7 +144,9 @@ export function normalizeAppConfig(
       queueId:
         settings.queueId === null
           ? null
-          : typeof settings.queueId === "number" && Number.isFinite(settings.queueId)
+          : typeof settings.queueId === "number" &&
+              Number.isSafeInteger(settings.queueId) &&
+              settings.queueId > 0
             ? settings.queueId
             : defaults.settings.queueId,
       autoCancelOnDisable:
@@ -114,26 +155,27 @@ export function normalizeAppConfig(
           : defaults.settings.autoCancelOnDisable,
       postGameDelayMinMs: Math.min(minDelay, maxDelay),
       postGameDelayMaxMs: Math.max(minDelay, maxDelay),
-      queueRetryBlockMs:
-        typeof settings.queueRetryBlockMs === "number" && settings.queueRetryBlockMs > 0
-          ? settings.queueRetryBlockMs
-          : defaults.settings.queueRetryBlockMs,
-      homeResetCooldownMs:
-        typeof settings.homeResetCooldownMs === "number" && settings.homeResetCooldownMs > 0
-          ? settings.homeResetCooldownMs
-          : defaults.settings.homeResetCooldownMs,
-      reconnectCooldownMs:
-        typeof settings.reconnectCooldownMs === "number" && settings.reconnectCooldownMs > 0
-          ? settings.reconnectCooldownMs
-          : defaults.settings.reconnectCooldownMs,
-      cycleReconnectTimeoutMs:
-        typeof settings.cycleReconnectTimeoutMs === "number" && settings.cycleReconnectTimeoutMs > 0
-          ? settings.cycleReconnectTimeoutMs
-          : defaults.settings.cycleReconnectTimeoutMs,
-      pollIntervalMs:
-        typeof settings.pollIntervalMs === "number" && settings.pollIntervalMs > 0
-          ? settings.pollIntervalMs
-          : defaults.settings.pollIntervalMs
+      queueRetryBlockMs: validDuration(
+        settings.queueRetryBlockMs,
+        defaults.settings.queueRetryBlockMs,
+      ),
+      homeResetCooldownMs: validDuration(
+        settings.homeResetCooldownMs,
+        defaults.settings.homeResetCooldownMs,
+      ),
+      reconnectCooldownMs: validDuration(
+        settings.reconnectCooldownMs,
+        defaults.settings.reconnectCooldownMs,
+      ),
+      cycleReconnectTimeoutMs: validDuration(
+        settings.cycleReconnectTimeoutMs,
+        defaults.settings.cycleReconnectTimeoutMs,
+      ),
+      pollIntervalMs: validDuration(
+        settings.pollIntervalMs,
+        defaults.settings.pollIntervalMs,
+        250,
+      ),
     },
     stats: {
       totalCycleCount:
@@ -141,10 +183,11 @@ export function normalizeAppConfig(
           ? stats.totalCycleCount
           : defaults.stats.totalCycleCount,
       sessionCycleCount:
-        typeof stats.sessionCycleCount === "number" && stats.sessionCycleCount >= 0
+        typeof stats.sessionCycleCount === "number" &&
+        stats.sessionCycleCount >= 0
           ? stats.sessionCycleCount
-          : defaults.stats.sessionCycleCount
-    }
+          : defaults.stats.sessionCycleCount,
+    },
   };
 }
 
@@ -168,7 +211,9 @@ export class MemoryConfigStore implements AppConfigStore {
     return this.get();
   }
 
-  update(updater: (current: PersistedAppConfig) => PersistedAppConfig): PersistedAppConfig {
+  update(
+    updater: (current: PersistedAppConfig) => PersistedAppConfig,
+  ): PersistedAppConfig {
     this.current = cloneConfig(updater(this.get()));
     return this.get();
   }
@@ -179,7 +224,7 @@ export class JsonConfigStore implements AppConfigStore {
 
   constructor(
     private readonly filePath: string,
-    private readonly defaults: PersistedAppConfig = createDefaultAppConfig()
+    private readonly defaults: PersistedAppConfig = createDefaultAppConfig(),
   ) {
     this.current = this.load(this.defaults);
   }
@@ -194,7 +239,9 @@ export class JsonConfigStore implements AppConfigStore {
     return this.get();
   }
 
-  update(updater: (current: PersistedAppConfig) => PersistedAppConfig): PersistedAppConfig {
+  update(
+    updater: (current: PersistedAppConfig) => PersistedAppConfig,
+  ): PersistedAppConfig {
     this.current = normalizeAppConfig(updater(this.get()), this.defaults);
     this.persist();
     return this.get();
@@ -212,7 +259,9 @@ export class JsonConfigStore implements AppConfigStore {
     }
 
     try {
-      const parsed = JSON.parse(fs.readFileSync(this.filePath, "utf8")) as Partial<PersistedAppConfig>;
+      const parsed = JSON.parse(
+        fs.readFileSync(this.filePath, "utf8"),
+      ) as Partial<PersistedAppConfig>;
       const normalized = normalizeAppConfig(parsed, defaults);
       this.current = normalized;
       this.persist();
@@ -226,6 +275,10 @@ export class JsonConfigStore implements AppConfigStore {
   }
 
   private persist(): void {
-    fs.writeFileSync(this.filePath, `${JSON.stringify(this.current, null, 2)}\n`, "utf8");
+    fs.writeFileSync(
+      this.filePath,
+      `${JSON.stringify(this.current, null, 2)}\n`,
+      "utf8",
+    );
   }
 }

@@ -2,45 +2,48 @@
   "name": "tft-auto-queue-next",
   "version": "0.8.1",
   "description": "TFT Auto Queue desktop app",
+  "author": "Epsilonxxx",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Epsilonxxx/TFT-Auto-Queue.git"
+  },
   "main": "dist-electron/main.js",
   "scripts": {
     "build:electron": "tsc -p tsconfig.electron.json",
-    "build:renderer": "vite build",
+    "build:renderer": "tsc --noEmit -p tsconfig.renderer.json && vite build",
     "build": "npm run build:electron && npm run build:renderer",
     "test": "vitest run",
+    "test:ui": "npm run build && node scripts/verify-ui.cjs",
+    "icons": "node scripts/create-icons.cjs",
     "start": "npm run build && electron .",
-    "dist": "npm run build && electron-builder --win nsis --config.win.signAndEditExecutable=false"
+    "dist": "npm run build && electron-builder --win nsis --publish never"
   },
   "dependencies": {
-    "@mui/icons-material": "^7.3.9",
-    "@mui/material": "^7.3.9",
-    "@mui/styled-engine-sc": "^7.3.9",
-    "axios": "^1.8.2",
+    "axios": "^1.20.0",
     "dotenv": "^16.5.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "styled-components": "^6.1.15",
-    "ws": "^8.18.0"
+    "ws": "^8.22.0"
   },
   "devDependencies": {
     "@types/node": "^22.13.5",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
-    "@types/styled-components": "^5.1.34",
     "@types/ws": "^8.5.14",
     "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.20",
-    "electron": "^35.2.0",
-    "electron-builder": "^24.13.3",
-    "postcss": "^8.5.3",
-    "tailwindcss": "^3.4.17",
+    "electron": "^45.0.0",
+    "electron-builder": "^26.18.0",
+    "playwright": "^1.64.1",
+    "postcss": "^8.5.31",
     "typescript": "^5.8.2",
-    "vite": "^6.2.0",
-    "vitest": "^3.2.4"
+    "vite": "^6.4.5",
+    "vitest": "^5.0.5"
   },
   "build": {
     "appId": "com.tft.autoqueue.next",
     "productName": "TFT Auto Queue",
+    "artifactName": "TFT.Auto.Queue.Setup.${version}.${ext}",
     "directories": {
       "output": "release"
     },
@@ -52,6 +55,7 @@
       ".env.example"
     ],
     "win": {
+      "icon": "assets/app-icon.ico",
       "target": [
         {
           "target": "nsis",
@@ -60,7 +64,7 @@
           ]
         }
       ],
-      "signAndEditExecutable": false
+      "signExecutable": false
     },
     "nsis": {
       "oneClick": false,
